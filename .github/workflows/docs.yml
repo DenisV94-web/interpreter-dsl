@@ -25,20 +25,11 @@ permissions:
   id-token: write # для OIDC-аутентификации (без токенов)
 
 # ============================================================
-# КОНКУРЕНТНОСТЬ (отменяем предыдущий запуск если пришёл новый push)
+# КОНКУРЕНТНОСТЬ (не убиваем начатый деплой новым пушем)
 # ============================================================
 concurrency:
   group: pages
-  cancel-in-progress:
-    false # не отменяем — дожидаемся окончания
-    # (чтобы Pages не остался в полуразвёрнутом состоянии)
-
-# ============================================================
-# ОКРУЖЕНИЕ (GitHub Pages — специальный environment)
-# ============================================================
-environment:
-  name: github-pages
-  url: ${{ steps.deployment.outputs.page_url }}
+  cancel-in-progress: false
 
 # ============================================================
 # JOBS
@@ -48,6 +39,11 @@ jobs:
     name: Build and Deploy
     runs-on: ubuntu-latest
 
+    # ОКРУЖЕНИЕ (GitHub Pages) — ключ ВНУТРИ job, а не сверху
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
     steps:
       # --------------------------------------------------------
       # 1. Клонирование репозитория
@@ -55,7 +51,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # полная история (для плагина git-revision-date)
+          fetch-depth: 0 # полная история (для git-revision-date)
 
       # --------------------------------------------------------
       # 2. Установка Python
@@ -64,7 +60,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip" # кеш pip-зависимостей между запусками
+          cache: "pip"
 
       # --------------------------------------------------------
       # 3. Установка MkDocs и плагинов
@@ -73,16 +69,13 @@ jobs:
         run: |
           pip install \
             mkdocs-material \
-            mkdocs-git-revision-date-localized-plugin \
-            mkdocs-minify-plugin
+            mkdocs-git-revision-date-localized-plugin
 
       # --------------------------------------------------------
-      # 4. Сборка документации
+      # 4. Сборка документации (strict: битые ссылки = ошибка)
       # --------------------------------------------------------
       - name: Build documentation
         run: mkdocs build --strict
-        # --strict: warning'и превращаются в ошибки
-        #           (сломанные ссылки, отсутствующие файлы)
 
       # --------------------------------------------------------
       # 5. Настройка Pages
@@ -96,7 +89,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./site # MkDocs складывает HTML сюда
+          path: ./site
 
       # --------------------------------------------------------
       # 7. Деплой на GitHub Pages
