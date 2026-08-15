@@ -66,10 +66,7 @@ jobs:
       # 3. Установка MkDocs и плагинов
       # --------------------------------------------------------
       - name: Install MkDocs dependencies
-        run: |
-          pip install \
-            mkdocs-material \
-            mkdocs-git-revision-date-localized-plugin
+        run: pip install -r requirements.txt
 
       # --------------------------------------------------------
       # 4. Сборка документации (strict: битые ссылки = ошибка)

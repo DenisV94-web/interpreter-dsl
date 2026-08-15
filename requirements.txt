@@ -1,0 +1,3 @@
+# Зависимости сборки документации (GitHub Actions)
+mkdocs-material
+mkdocs-git-revision-date-localized-plugin
