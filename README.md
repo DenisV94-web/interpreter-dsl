@@ -7,7 +7,7 @@
 и сборку ответа — с единым логированием и обработкой ошибок.
 
 > 📖 Полная документация — в папке [`docs/`](docs/) и на GitHub Pages
-> (ссылка появится после первого деплоя: `https://<ваш-ник>.github.io/interpreter-dsl/`).
+> (ссылка появится после первого деплоя: `https://denisv94-web.github.io/interpreter-dsl/`).
 
 ---
 
@@ -58,6 +58,6 @@
 ### 1. Клонируйте репозиторий
 
 ```bash
-git clone https://github.com/<ваш-ник>/interpreter-dsl.git
+git clone https://github.com/DenisV94-web/interpreter-dsl.git
 cd interpreter-dsl
 ```

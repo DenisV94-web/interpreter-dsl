@@ -11,6 +11,8 @@ on:
       - main
     paths:
       - "docs/**" # любые изменения в папке docs/
+      - "mkdocs.yml" # конфиг документации
+      - "requirements.txt" # зависимости сборки
       - ".github/workflows/docs.yml" # изменения самого workflow
 
   # 2. Ручной запуск — удобно для принудительного пересобирания
