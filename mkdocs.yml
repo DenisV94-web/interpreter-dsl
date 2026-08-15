@@ -1,0 +1,149 @@
+# ============================================================
+# КОНФИГУРАЦИЯ ДОКУМЕНТАЦИИ (MkDocs + Material)
+# Язык — русский. Сборка: GitHub Actions (docs.yml).
+# ============================================================
+
+site_name: Interpreter DSL — документация
+site_description: >-
+  Декларативный DSL-интерпретатор конфигураций API-эндпоинтов
+  для Битрикс24: request, mapping, execute, compose.
+site_url: https://denisv94-web.github.io/interpreter-dsl/
+repo_name: DenisV94-web/interpreter-dsl
+repo_url: https://github.com/DenisV94-web/interpreter-dsl
+edit_uri: edit/main/docs/ # кнопка «Редактировать страницу»
+
+# Не показывать «Made with Material» в подвале
+copyright: Interpreter DSL, 2026
+
+# ============================================================
+# ТЕМА
+# ============================================================
+theme:
+  name: material
+  language: ru # ← русский интерфейс темы
+
+  # Иконка в шапке
+  icon:
+    logo: material/code-json
+    repo: fontawesome/brands/github
+
+  # Светлая/тёмная тема с переключателем (подписи на русском)
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Переключить на тёмную тему
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Переключить на светлую тему
+
+  font:
+    text: Roboto
+    code: Roboto Mono
+
+  features:
+    - navigation.tabs # разделы — табами в шапке
+    - navigation.sections # сворачиваемые секции в сайдбаре
+    - navigation.expand # секции раскрыты по умолчанию
+    - navigation.top # кнопка «наверх»
+    - navigation.tracking # URL следит за скроллом по заголовкам
+    - navigation.footer # кнопки «назад/вперёд» внизу страницы
+    - search.suggest # подсказки при вводе поиска
+    - search.highlight # подсветка найденного на странице
+    - content.code.copy # кнопка копирования у блоков кода
+    - content.code.annotate # аннотации (1) в блоках кода
+    - toc.follow # оглавление следит за скроллом
+
+# ============================================================
+# ПЛАГИНЫ
+# ============================================================
+plugins:
+  # Русский поиск (стемминг Snowball для русского)
+  - search:
+      lang:
+        - ru
+        - en # en — чтобы искал и английские термины (field:, curl)
+
+  # Дата последнего изменения страницы из git (на русском)
+  - git-revision-date-localized:
+      type: date
+      custom_format: "%d.%m.%Y"
+      timezone: Europe/Moscow
+      fallback_to_build_date: true
+      enable_creation_date: false
+
+# ============================================================
+# РАСШИРЕНИЯ MARKDOWN
+# ============================================================
+markdown_extensions:
+  # Блоки-выноски: !!! info / warning / danger — переводятся темой на русский
+  - admonition
+  - pymdownx.details # раскрывающиеся блоки ???
+
+  # Код-блоки с подсветкой + диаграммы mermaid
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format:
+            !!python/name:pymdownx.superfences.fence_code_format # Табы (например: «Конфиг | Результат»)
+
+
+  - pymdownx.tabbed:
+      alternate_style: true
+
+  # Подсветка кода
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+
+  # Вставка живого кода из examples/ прямо в страницы вики:
+  #   --8<-- "examples/Config.example.php"
+  - pymdownx.snippets:
+      base_path: !relative . # пути относительно корня репозитория
+      check_paths: true # битая ссылка = ошибка сборки
+
+  - tables
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true # якорь ¶ у заголовков
+
+# ============================================================
+# НАВИГАЦИЯ (русские названия разделов)
+# ============================================================
+nav:
+  - Главная: index.md
+  - История изменений: changelog.md
+
+  - Быстрый старт:
+      - Установка: getting-started/installation.md
+      - Первый запуск: getting-started/quickstart.md
+
+  - Язык DSL:
+      - Обзор: language/index.md
+      - Выражения: language/field.md
+      - Условия: language/conditions.md
+
+  - Блоки конфигурации:
+      - Обзор: executors/index.md
+      - request: executors/request.md
+      - mapping: executors/mapping.md
+      - execute: executors/execute.md
+      - compose: executors/compose.md
+
+  - Архитектура:
+      - Компоненты: components/architecture.md
+      - Контекст и params: components/context.md
+      - Логирование: components/logging.md
+
+  - Примеры:
+      - demo_lead и demo_card: examples/demo.md
+
+  - Расширение:
+      - Шаблон страницы фичи: extending/doc-template.md
