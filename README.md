@@ -6,8 +6,8 @@
 один движок выполняет запросы, маппинг, условия, итерации, cURL-вызовы
 и сборку ответа — с единым логированием и обработкой ошибок.
 
-> 📖 Полная документация — в папке [`docs/`](docs/) и на GitHub Pages
-> (ссылка появится после первого деплоя: `https://denisv94-web.github.io/interpreter-dsl/`).
+> 📖 Полная документация — в папке [`docs/`](docs/) и на GitHub Pages:
+> [`https://denisv94-web.github.io/interpreter-dsl/`](https://denisv94-web.github.io/interpreter-dsl/).
 
 ---
 
