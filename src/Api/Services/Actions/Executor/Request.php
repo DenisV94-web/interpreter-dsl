@@ -400,6 +400,12 @@ class Request
                 // Пишем в контекст сразу — следующие extra могут зависеть
                 $this->context->set($key, $resolved);
 
+                // Флаг no_log: значение остаётся доступным через field:,
+                // но исключается из log.computed и снимков итераций
+                if (is_array($expression) && ($expression['no_log'] ?? false) === true) {
+                    $this->context->markAsHidden($key);
+                }
+
                 $this->context->log('SUCCESS', 'Request', "Extra поле вычислено: {$key}", [
                     'value' => $resolved
                 ]);
@@ -437,7 +443,6 @@ class Request
         }
 
         // ДОБАВЛЕНО: массив без спец-ключей — резолвим СОДЕРЖИМОЕ рекурсивно.
-        // Кейс: additional_fields = ['field_id_decrypt' => 'field:client_string']
         if (is_array($expression)) {
             return $this->fieldResolver->resolveParams($expression);
         }
@@ -532,7 +537,6 @@ class Request
      * - Строка '\Class::method' → вызов статического метода
      * - Массив с method/class/params → через Method resolver
      * 
-     * ВАЖНО: класс нельзя назвать Static (зарезервировано)
      * 
      * @param array $staticConfig Конфигурация static
      * @return void

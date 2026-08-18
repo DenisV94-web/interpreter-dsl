@@ -124,6 +124,14 @@ class Context
     private array $staticKeys = [];
 
     /**
+     * Ключи, скрытые из лога по флагу no_log (не попадают в computed и снимки)
+     * Значения доступны через field: во всех блоках
+     * 
+     * @var array
+     */
+    private array $hiddenKeys = [];
+
+    /**
      * Context constructor.
      * 
      * @param array $rawRequest Исходные данные запроса
@@ -402,6 +410,31 @@ class Context
     }
 
     /**
+     * Помечает ключ как скрытый из log.computed и снимков итераций.
+     * Значение остаётся доступным через field: во всех блоках.
+     * 
+     * @param string $key Имя ключа
+     * @return void
+     */
+    public function markAsHidden(string $key): void
+    {
+        if (!in_array($key, $this->hiddenKeys, true)) {
+            $this->hiddenKeys[] = $key;
+        }
+    }
+
+    /**
+     * Скрыт ли ключ из лога
+     * 
+     * @param string $key Имя ключа
+     * @return bool
+     */
+    public function isHidden(string $key): bool
+    {
+        return in_array($key, $this->hiddenKeys, true);
+    }
+
+    /**
      * Возвращает только вычисленные поля (extra, query, mapping)
      * 
      * Это diff: всё что интерпретатор добавил СВЕРХ
@@ -420,9 +453,14 @@ class Context
         // params логируются отдельно, не в computed
         unset($computed['params']);
 
-        // ДОБАВЛЕНО: исключаем static-ключи (справочники не логируем)
+        // Исключаем static-ключи (справочники не логируем)
         foreach ($this->staticKeys as $staticKey) {
             unset($computed[$staticKey]);
+        }
+
+        // Исключаем hidden-ключи (no_log: большие обогащённые массивы)
+        foreach ($this->hiddenKeys as $hiddenKey) {
+            unset($computed[$hiddenKey]);
         }
 
         return $computed;

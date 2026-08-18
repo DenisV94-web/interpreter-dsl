@@ -107,6 +107,23 @@ JSON из `php://input` имеет приоритет над суперглоб�
 'const'     => 'NEW',                            // литерал
 ```
 
+### 5. Флаг `no_log` — исключить результат из лога
+
+Любая форма extra-выражения может нести флаг `no_log`:
+
+```php
+'enriched_tasks' => [
+    'method' => 'enrichTasks',
+    'class'  => \DesktopManager\TaskEnrichmentService::class,
+    'params' => ['field:tabs_new'],
+    'no_log' => true,
+],
+```
+
+Значение пишется в контекст и доступно через `field:` во всех блоках,
+но исключается из `log.computed` и снимков итераций.
+Подробности — в [Логировании](../components/logging.md#flag-no_log-dlya-extra).
+
 ### Цепочки зависимостей
 
 Поле пишется в контекст **сразу**, поэтому следующие `extra`

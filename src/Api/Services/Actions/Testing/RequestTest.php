@@ -3,6 +3,7 @@
 namespace Api\Services\Actions\Testing;
 
 use Api\Services\Actions\Context;
+use Api\Services\Actions\Interpreter;
 use Api\Services\Actions\Resolver\Field;
 use Api\Services\Actions\Resolver\Condition;
 use Api\Services\Actions\Resolver\Method;
@@ -20,11 +21,12 @@ use Api\Services\Actions\Executor\Request;
  *   с поддержкой цепочек зависимостей между полями
  * - query: запросы к БД/внешним системам (getList, getById) с conditions
  * - on_error: fallback при исключении в query (иначе — ошибка итерации)
+ * - no_log: флаг скрытия больших массивов из log.computed (v1.3.0)
  * - Итерационный режим: request.array — обработка массива объектов
  * 
  * Лог: Request_YYYY-MM-DD_HH-II-SS.log
  * 
- * Всего тестов: 8
+ * Всего тестов: 11
  * 
  * @package Api\Services\Actions\Testing
  */
@@ -87,6 +89,7 @@ class RequestTest
      * - query с conditions (4-5)
      * - Итерационный режим (6)
      * - on_error в query (7-8)
+     * - no_log флаг (9-11)
      * 
      * @return void
      */
@@ -109,6 +112,11 @@ class RequestTest
         // on_error в query
         $this->testQueryWithOnError();
         $this->testQueryErrorWithoutOnError();
+
+        // no_log флаг (v1.3.0)
+        $this->testNoLogHidesFromComputed();
+        $this->testNoLogAbsentFieldVisible();
+        $this->testNoLogWorksInCompose();
 
         $this->logger->summary($this->passed, $this->failed);
 
@@ -455,7 +463,164 @@ class RequestTest
             ['check' => 'hasError() === true']
         );
     }
-    
+
+    // ========================================================
+    // NO_LOG ФЛАГ (тесты 9-11, v1.3.0)
+    // ========================================================
+
+    /**
+     * Тест 9: no_log=true скрывает поле из computed
+     * 
+     * Входные данные: tasks = список из 2 задач.
+     * Конфиг extra: enriched_tasks = enrichTasks(tasks) с no_log=true.
+     * Ожидание:
+     * - context.enriched_tasks доступен и содержит обогащённые данные
+     * - getComputedData() НЕ содержит ключ enriched_tasks
+     * 
+     * @return void
+     */
+    private function testNoLogHidesFromComputed(): void
+    {
+        $this->logger->separator('testNoLogHidesFromComputed');
+
+        [$request, $context] = $this->createRequest([]);
+
+        $request->execute([
+            'main' => 'post',
+            'extra' => [
+                'enriched_tasks' => [
+                    'method' => 'enrichTasks',
+                    'class' => MockEnrichmentService::class,
+                    'params' => ['field:tasks'],
+                    'no_log' => true,
+                ]
+            ]
+        ], [
+            'tasks' => [
+                ['id' => 1, 'unified_client_id' => 'client_100', 'id_user' => 42],
+                ['id' => 2, 'unified_client_id' => 'client_200', 'id_user' => 7],
+            ]
+        ]);
+
+        // Проверка 1: значение доступно в контексте
+        $enrichedTasks = $context->get('enriched_tasks');
+        $this->assert(
+            'testNoLogHidesFromComputed_Available',
+            true,
+            is_array($enrichedTasks) && count($enrichedTasks) === 2,
+            'enriched_tasks должен быть доступен через field:',
+            ['check' => 'context.get("enriched_tasks") is array']
+        );
+
+        // Проверка 2: обогащение сработало
+        $this->assert(
+            'testNoLogHidesFromComputed_Enriched',
+            'Иванов Иван',
+            $enrichedTasks[0]['client_name'] ?? null,
+            'Первая задача должна содержать client_name после обогащения',
+            ['check' => 'enriched_tasks[0].client_name']
+        );
+
+        // Проверка 3: поле скрыто из computed
+        $computed = $context->getComputedData();
+        $this->assert(
+            'testNoLogHidesFromComputed_Hidden',
+            false,
+            array_key_exists('enriched_tasks', $computed),
+            'enriched_tasks НЕ должен попадать в getComputedData()',
+            ['check' => '!array_key_exists("enriched_tasks", computed)']
+        );
+    }
+
+    /**
+     * Тест 10: Без no_log поле попадает в computed (обычное поведение)
+     * 
+     * Тот же enrichTasks, но без флага no_log.
+     * Ожидание: enriched_tasks ЕСТЬ в getComputedData().
+     * 
+     * @return void
+     */
+    private function testNoLogAbsentFieldVisible(): void
+    {
+        $this->logger->separator('testNoLogAbsentFieldVisible');
+
+        [$request, $context] = $this->createRequest([]);
+
+        $request->execute([
+            'main' => 'post',
+            'extra' => [
+                'enriched_tasks' => [
+                    'method' => 'enrichTasks',
+                    'class' => MockEnrichmentService::class,
+                    'params' => ['field:tasks'],
+                    // no_log отсутствует
+                ]
+            ]
+        ], [
+            'tasks' => [
+                ['id' => 1, 'unified_client_id' => 'client_100', 'id_user' => 42],
+            ]
+        ]);
+
+        $computed = $context->getComputedData();
+        $this->assert(
+            'testNoLogAbsentFieldVisible',
+            true,
+            array_key_exists('enriched_tasks', $computed),
+            'Без no_log поле должно попадать в computed (обратная совместимость)',
+            ['check' => 'array_key_exists("enriched_tasks", computed)']
+        );
+    }
+
+    /**
+     * Тест 11: no_log поле работает в compose (интеграционный тест)
+     * 
+     * Конфиг: extra с no_log → compose берёт field:enriched_tasks.
+     * Ожидание: ответ содержит обогащённые данные (no_log не ломает работу).
+     * 
+     * @return void
+     */
+    private function testNoLogWorksInCompose(): void
+    {
+        $this->logger->separator('testNoLogWorksInCompose');
+
+        $config = [
+            'test_no_log_compose' => [
+                'request' => [
+                    'main' => 'post',
+                    'extra' => [
+                        'enriched_tasks' => [
+                            'method' => 'enrichTasks',
+                            'class' => MockEnrichmentService::class,
+                            'params' => ['field:tasks'],
+                            'no_log' => true,
+                        ]
+                    ]
+                ],
+                'compose' => [
+                    'tasks' => 'field:enriched_tasks',
+                ],
+                'action_logic' => ['request', 'compose'],
+            ],
+        ];
+
+        $interpreter = new Interpreter($config);
+        $response = $interpreter->run('test_no_log_compose', 'test', [
+            'tasks' => [
+                ['id' => 1, 'unified_client_id' => 'client_100', 'id_user' => 42],
+            ]
+        ]);
+
+        $this->assert(
+            'testNoLogWorksInCompose',
+            'Иванов Иван',
+            $response->response['tasks'][0]['client_name'] ?? null,
+            'no_log поле должно работать в compose (не ломает ответ)',
+            ['check' => 'response.tasks[0].client_name']
+        );
+    }
+
+
     // ========================================================
     // УТИЛИТА ПРОВЕРКИ
     // ========================================================
@@ -546,5 +711,39 @@ class MockQueryService
     public function throwingGetById(int $contactId): array
     {
         throw new \TypeError('Return value must be of type ?array, false returned');
+    }
+}
+
+// ============================================================
+// МОК-КЛАСС ДЛЯ ENRICHMENT (v1.3.0)
+// ============================================================
+
+/**
+ * Class MockEnrichmentService
+ * 
+ * Мок-класс для тестирования флага no_log.
+ * Имитирует обогащение списка задач именами клиентов и менеджеров.
+ * 
+ * @package Api\Services\Actions\Testing
+ */
+class MockEnrichmentService
+{
+    /**
+     * Имитация enrichTasks: добавляет client_name и assigned_name
+     * 
+     * @param array $tasks Список задач
+     * @return array Обогащённый список задач
+     */
+    public function enrichTasks(array $tasks): array
+    {
+        foreach ($tasks as &$task) {
+            // Имитация batch-запроса: в реальности здесь были бы
+            // Contact::getByIds() и User::getByIds()
+            $task['client_name'] = 'Иванов Иван';
+            $task['assigned_name'] = 'Петров Пётр';
+        }
+        unset($task);
+
+        return $tasks;
     }
 }
