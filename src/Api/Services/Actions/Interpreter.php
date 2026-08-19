@@ -170,6 +170,13 @@ class Interpreter
     private ?string $currentArrayKey = null;
 
     /**
+     * ResponseHandler последнего run() — для записи response в лог
+     * 
+     * @var ResponseHandler|null
+     */
+    private ?ResponseHandler $lastResponseHandler = null;
+
+    /**
      * Interpreter constructor.
      * 
      * @param array $config Массив конфигураций всех действий
@@ -222,6 +229,7 @@ class Interpreter
         $this->currentArrayKey = null;
 
         $responseHandler = new ResponseHandler();
+        $this->lastResponseHandler = $responseHandler;
 
         try {
             // 1. Валидация наличия действия
@@ -534,6 +542,10 @@ class Interpreter
                     'config_path' => $error['config_path']
                 ];
 
+                if (!empty($error['error_context'])) {
+                    $errorEntry['error_context'] = $error['error_context'];
+                }
+
                 // ДОБАВЛЕНО: свои поля в error-записи (опционально)
                 if (isset($actionConfig['error_response']) && is_array($actionConfig['error_response'])) {
                     foreach ($actionConfig['error_response'] as $key => $expression) {
@@ -630,20 +642,13 @@ class Interpreter
     }
 
     /**
-     * Собирает структуру запроса для логирования.
-     * 
-     * ВСЕГДА: data + params (если есть) + computed/снимки (если не обрезаны)
-     * При ошибках: + error (с error_context из упавшего вызова)
-     * При log_response: + response (auto для итерационных)
-     * При переполнении: деградация до max_log_size
+     * Собирает payload «строки запроса»: что успели собрать до ошибки.
+     * data + params + computed. Ошибка и response живут в buildLogResponse().
      * 
      * @return array
      */
     public function buildLogRequest(): array
     {
-        $actionConfig = $this->config[$this->currentActionName] ?? [];
-        $maxLogSize = $actionConfig['max_log_size'] ?? 65535;
-
         $log = [
             'data' => $this->rawRequestData
         ];
@@ -655,7 +660,6 @@ class Interpreter
         $context = $this->context;
 
         if ($context !== null) {
-            // COMPUTED: снимки итераций или одиночный getComputedData
             if (!empty($context->iterationSnapshots)) {
                 $log['computed'] = [];
                 foreach ($context->iterationSnapshots as $index => $snapshot) {
@@ -667,101 +671,145 @@ class Interpreter
                     $log['computed'] = $computed;
                 }
             }
-
-            // ERROR + ERROR_CONTEXT
-            if (!empty($context->iterationErrors)) {
-                $errors = [];
-                foreach ($context->iterationErrors as $index => $error) {
-                    $entry = [
-                        'iteration' => $index,
-                        'config_path' => $error['config_path'],
-                        'message' => $error['message'],
-                        'detailed_message' => $error['detailed_message']
-                    ];
-                    if (!empty($error['error_context'])) {
-                        $entry['error_context'] = $error['error_context'];
-                    }
-                    $errors[] = $entry;
-                }
-                $log['error'] = (count($errors) === 1) ? $errors[0] : $errors;
-            } elseif ($context->hasError()) {
-                $error = $context->error;
-                $entry = [
-                    'iteration' => $context->iterationIndex,
-                    'config_path' => $error['config_path'],
-                    'message' => $error['message'],
-                    'detailed_message' => $error['detailed_message']
-                ];
-                if (!empty($error['error_context'])) {
-                    $entry['error_context'] = $error['error_context'];
-                }
-                $log['error'] = $entry;
-            }
-
-            // RESPONSE (v1.4.0): auto для итерационных, иначе по флагу
-            $logResponseFlag = $actionConfig['log_response'] ?? null;
-            $logResponse = ($logResponseFlag === null)
-                ? ($this->currentArrayKey !== null)
-                : (bool) $logResponseFlag;
-
-            if ($logResponse && !empty($context->response)) {
-                $log['response'] = $context->response;
-            }
         }
 
-        // ПРЕДОХРАНИТЕЛЬ: обрезать если больше max_log_size
-        return $this->applyMaxLogSize($log, $maxLogSize);
+        $maxSize = (int) ($this->config[$this->currentActionName]['max_log_size'] ?? 65535);
+
+        return $this->limitPayload($log, $maxSize);
     }
 
     /**
-     * Применяет деградацию лога при превышении max_log_size.
+     * Собирает payload «строки ответа»: что получил клиент / сама ошибка.
      * 
-     * Порядок деградации (error/params/status НИКОГДА не режутся):
-     * 1. Убрать computed (снимки итераций)
-     * 2. Обрезать data
-     * 3. Обрезать response
+     * Порядок:
+     * 1. Одиночная ошибка контекста — объект ошибки с error_context;
+     * 2. Итерации — массив записей response (успешные + ERROR-записи);
+     *    одиночный успех — response только при log_response;
+     * 3. Глобальная ошибка (ConfigException и т.п.) — status + message;
+     * 4. Одиночный успех без log_response — компактно {"status": "SUCCESS"}.
      * 
-     * @param array $log Собранный лог
-     * @param int $maxSize Максимальный размер в байтах
-     * @return array Возможно усечённый лог
+     * @return array
      */
-    private function applyMaxLogSize(array $log, int $maxSize): array
+    public function buildLogResponse(): array
     {
-        $encoded = json_encode($log, JSON_UNESCAPED_UNICODE);
+        $context = $this->context;
+        $actionConfig = $this->config[$this->currentActionName] ?? [];
+        $maxSize = (int) ($actionConfig['max_log_size'] ?? 65535);
+
+        // 1. Одиночная ошибка — сама ошибка с error_context
+        if ($context !== null && $context->hasError()) {
+            return $this->limitPayload(
+                $this->buildErrorEntry($context->error, $context->iterationIndex),
+                $maxSize
+            );
+        }
+
+        // 2. Что ушло клиенту
+        $logResponseFlag = $actionConfig['log_response'] ?? null;
+        $logResponse = ($logResponseFlag === null)
+            ? ($this->currentArrayKey !== null)
+            : (bool) $logResponseFlag;
+
+        if ($context !== null && $logResponse && !empty($context->response)) {
+            return $this->limitPayload($context->response, $maxSize);
+        }
+
+        // 3. Глобальная ошибка (ConfigException и т.п.)
+        if (
+            $this->lastResponseHandler !== null
+            && $this->lastResponseHandler->status === 'ERROR'
+        ) {
+            return [
+                'status'  => 'ERROR',
+                'message' => $this->lastResponseHandler->message,
+            ];
+        }
+
+        // 4. Одиночный успех без log_response — компактно
+        return [
+            'status' => $this->lastResponseHandler !== null
+                ? $this->lastResponseHandler->status
+                : 'SUCCESS'
+        ];
+    }
+
+    /**
+     * Формирует объект ошибки для строки ответа
+     * 
+     * @param array $error Ошибка контекста
+     * @param int|null $iteration Индекс итерации
+     * @return array
+     */
+    private function buildErrorEntry(array $error, ?int $iteration): array
+    {
+        $entry = [
+            'iteration'        => $iteration,
+            'config_path'      => $error['config_path'],
+            'message'          => $error['message'],
+            'detailed_message' => $error['detailed_message'],
+        ];
+
+        if (!empty($error['error_context'])) {
+            $entry['error_context'] = $error['error_context'];
+        }
+
+        return $entry;
+    }
+
+    /**
+     * Ограничивает payload размером max_log_size.
+     * 
+     * Для объекта (request-строка): убрать computed → обрезать data.
+     * Для списка (response итераций): оставить первую, последнюю и ERROR-записи.
+     * 
+     * @param array $payload Payload
+     * @param int $maxSize Лимит в байтах
+     * @return array Ограниченный payload
+     */
+    private function limitPayload(array $payload, int $maxSize): array
+    {
+        $encoded = json_encode($payload, JSON_UNESCAPED_UNICODE);
         if ($encoded === false || strlen($encoded) <= $maxSize) {
-            return $log;
+            return $payload;
         }
 
         $originalSize = strlen($encoded);
-        $log['_truncated'] = ['original_size' => $originalSize, 'max_size' => $maxSize];
 
-        // Шаг 1: убираем computed
-        if (isset($log['computed'])) {
-            unset($log['computed']);
-            $log['_truncated']['reason'] = 'computed_removed';
-            $encoded = json_encode($log, JSON_UNESCAPED_UNICODE);
-            if (strlen($encoded) <= $maxSize) {
-                return $log;
+        // Длинный список (response итераций): первая + последняя + ERROR
+        if (array_is_list($payload)) {
+            $kept = [];
+            $lastIndex = count($payload) - 1;
+
+            foreach ($payload as $index => $entry) {
+                $isError = is_array($entry) && ($entry['status'] ?? '') === 'ERROR';
+
+                if ($index === 0 || $index === $lastIndex || $isError) {
+                    $kept[] = $entry;
+                }
+            }
+
+            return $kept;
+        }
+
+        $payload['_truncated'] = ['original_size' => $originalSize, 'max_size' => $maxSize];
+
+        // 1. Убрать computed (request payload)
+        if (isset($payload['computed'])) {
+            unset($payload['computed']);
+            $payload['_truncated']['reason'] = 'computed_removed';
+            $encoded = json_encode($payload, JSON_UNESCAPED_UNICODE);
+            if ($encoded !== false && strlen($encoded) <= $maxSize) {
+                return $payload;
             }
         }
 
-        // Шаг 2: обрезаем data
-        if (isset($log['data'])) {
-            $log['data'] = $this->truncateValue($log['data'], (int)($maxSize * 0.4));
-            $log['_truncated']['reason'] = 'data_truncated';
-            $encoded = json_encode($log, JSON_UNESCAPED_UNICODE);
-            if (strlen($encoded) <= $maxSize) {
-                return $log;
-            }
+        // 2. Обрезать data
+        if (isset($payload['data'])) {
+            $payload['data'] = $this->truncateValue($payload['data'], (int) ($maxSize * 0.5));
+            $payload['_truncated']['reason'] = 'data_truncated';
         }
 
-        // Шаг 3: обрезаем response
-        if (isset($log['response'])) {
-            $log['response'] = $this->truncateValue($log['response'], (int)($maxSize * 0.3));
-            $log['_truncated']['reason'] = 'response_truncated';
-        }
-
-        return $log;
+        return $payload;
     }
 
     /**
@@ -827,11 +875,13 @@ class Interpreter
     /**
      * Единственная точка записи в Logger.
      * 
-     * protected — чтобы тесты могли переопределить (SpyInterpreter)
-     * и проверять логирование без реального Logger и без сети/БД.
+     * Строка запроса  ← setRequest(json buildLogRequest)
+     * Строка ответа   ← setInfo(json buildLogResponse)
+     *   (корпоративный Logger заполняет колонку ответа из info;
+     *    человекочитаемый message при этом живёт внутри JSON)
      * 
      * @param string $status Статус (SUCCESS / ERROR)
-     * @param string $info Сообщение
+     * @param string $info Сообщение (для совместимости сигнатуры)
      * @return void
      */
     protected function emitLog(string $status, string $info): void
@@ -840,14 +890,26 @@ class Interpreter
             return;
         }
 
+        $requestPayload  = $this->buildLogRequest();
+        $responsePayload = $this->buildLogResponse();
+
         $this->logger->setSection($this->getLogSection());
         $this->logger->setMethod($this->getLogMethod());
+
+        // Строка запроса: data + params + computed
         $this->logger->setRequest(json_encode(
-            $this->buildLogRequest(),
+            $requestPayload,
             JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT
         ));
+
+        // Строка ответа: ошибка с error_context / response клиента.
+        // Корпоративный Logger пишет в колонку ответа именно setInfo.
+        $this->logger->setInfo(json_encode(
+            $responsePayload,
+            JSON_UNESCAPED_UNICODE
+        ));
+
         $this->logger->setStatus($status);
-        $this->logger->setInfo($info);
         $this->logger->log();
     }
 

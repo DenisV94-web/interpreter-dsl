@@ -133,31 +133,48 @@ tests/logs/Field_2026-08-15_18-14-32.log
 
 ---
 
-## Умное логирование (v1.4.0)
+## Умное логирование (v1.5.0)
+
+### Контракт корпоративного Logger
+
+Корпоративный Logger пишет в две колонки highload-блока.
+Интерпретатор заполняет их так:
+
+| Колонка                         | Метод Logger | Содержимое                                                                                     |
+| ------------------------------- | ------------ | ---------------------------------------------------------------------------------------------- |
+| **UF_REQUEST** (Строка запроса) | `setRequest` | JSON `buildLogRequest()`: `data` + `params` + `computed` — что успели собрать                  |
+| **UF_RESPONSE** (Строка ответа) | `setInfo`    | JSON `buildLogResponse()`: сама ошибка с `error_context` / массив response / компактный status |
+
+> **Важно:** колонка `UF_RESPONSE` в корпоративном Logger заполняется из `info`,
+> поэтому JSON строки ответа передаётся через `setInfo`. Человекочитаемый
+> текст ошибки при этом живёт внутри JSON (`message`, `detailed_message`).
 
 ### Error Context
 
-При ошибке вызова метода в лог попадает `error_context` —
-**class**, **method** и **resolved_params** упавшего вызова:
+При ошибке вызова метода в строку ответа попадает `error_context`:
 
 ```json
-"error": {
-    "config_path": "request.query.ENTITIES",
-    "message": "Ошибка выполнения запроса 'ENTITIES'",
-    "detailed_message": "Argument #3 ($phone) must be of type string, null given",
-    "error_context": {
-        "class": "DesktopManager\\Main",
-        "method": "getEntities",
-        "resolved_params": ["555", "contact", null, [12]]
-    }
+{
+  "iteration": null,
+  "config_path": "request.query.ENTITIES",
+  "message": "Ошибка выполнения запроса 'ENTITIES'",
+  "detailed_message": "...Argument #3 ($phone) must be of type string, null given...",
+  "error_context": {
+    "class": "DesktopManager\\Main",
+    "method": "getEntities",
+    "resolved_params": [
+      "555",
+      "contact",
+      null,
+      { "__array__": true, "count": 1, "sample": [12] }
+    ]
+  }
 }
 ```
 
-Применяется ко всем ошибкам методов, независимо от `logging`.
-Большие массивы/объекты в параметрах автоматически сокращаются
-(скаляры остаются как есть).
+Скаляры — как есть. Массивы — `{__array__: true, count, sample}`. Объекты — `{__object__: true, class}`. Применяется ко всем ошибкам методов, включая ERROR-записи итераций в partial-режиме.
 
-### `max_log_size` — предохранитель от переполнения
+### `max_log_size`
 
 ```php
 'action' => [
@@ -165,34 +182,26 @@ tests/logs/Field_2026-08-15_18-14-32.log
 ],
 ```
 
-При превышении лог деградирует в порядке:
+| Тип строки      | Стратегия деградации                                    |
+| --------------- | ------------------------------------------------------- |
+| Запрос (объект) | убрать `computed` → обрезать `data`. Флаг `_truncated`. |
+| Ответ-список    | сохранить первую, последнюю и ERROR-записи.             |
 
-1. убрать `computed` (снимки итераций);
-2. обрезать `data`;
-3. обрезать `response`.
+Применяется к каждой строке **независимо**.
 
-**Никогда не режутся:** `status`, `error`, `error_context`, `params`.
-В лог добавляется флаг `_truncated` с `original_size`, `max_size`,
-`reason` (`computed_removed` / `data_truncated` / `response_truncated`).
-
-### `log_response` — запись ответа в лог
+### `log_response`
 
 ```php
-'action' => [
-    'log_response' => null,  // null | true | false
-],
+'action' => ['log_response' => null],  // null | true | false
 ```
 
-| Значение           | Поведение                                                |
-| ------------------ | -------------------------------------------------------- |
-| `null` (умолчание) | **Авто**: итерационные пишут `response`, одиночные — нет |
-| `true`             | всегда писать                                            |
-| `false`            | никогда не писать                                        |
+| Значение           | Поведение                                            |
+| ------------------ | ---------------------------------------------------- |
+| `null` (умолчание) | **Авто**: итерации — пишут response, одиночные — нет |
+| `true`             | всегда писать                                        |
+| `false`            | не писать (кроме ERROR-исхода — там всегда)          |
 
-Кейс авто: для CRUD (add/update/delete) обычно нужно «что пришло и что ушло»,
-для GET-справочников — `response` лишний шум.
-
-### `transaction.snapshot_mode` — снимки итераций
+### `transaction.snapshot_mode`
 
 ```php
 'transaction' => [
@@ -201,13 +210,15 @@ tests/logs/Field_2026-08-15_18-14-32.log
 ],
 ```
 
-| Режим             | Что сохраняется в `computed.iteration_N` |
-| ----------------- | ---------------------------------------- |
-| `all` (умолчание) | все итерации (обратная совместимость)    |
-| `errors_only`     | только упавшие итерации                  |
-| `first_last`      | первая + последняя + ошибки              |
+| Режим             | Что сохраняется в `computed.iteration_N` (строка запроса) |
+| ----------------- | --------------------------------------------------------- |
+| `all` (умолчание) | все итерации (обратная совместимость)                     |
+| `errors_only`     | только упавшие итерации                                   |
+| `first_last`      | первая + последняя + ошибки                               |
 
-Комбинируется с `max_log_size`: даже при `all` переполнение не случится.
+### Флаг `logging` (с 1.3.1–1.3.2)
+
+`logging: false` глушит **только чистый SUCCESS**. Любые ERROR-исходы (контекст, глобальные, итерационные) пишутся в Logger **всегда**.
 
 ---
 

@@ -5,66 +5,78 @@ namespace Api\Services;
 /**
  * Class Logger
  * 
- * Минимальная standalone-версия: пишет JSON-строки в файл.
- * В продакшене подменяется корпоративным логгером (UF_REQUEST и т.д.).
- * API совпадает с тем, что использует Interpreter.
+ * Standalone-версия корпоративного Logger для тестов на ПК.
+ * 
+ * Контракт (совпадает с корпоративным Api\Services\Logger):
+ * - setRequest(string)  → строка запроса (JSON из buildLogRequest)
+ * - setInfo(string)     → строка ответа (JSON из buildLogResponse)
+ * - setStatus(string)   → SUCCESS / ERROR
+ * - setSection(string)  → секция
+ * - setMethod(string)   → метод
+ * - log()               → запись (в файл в standalone)
  * 
  * @package Api\Services
  */
 class Logger
 {
-    private array $context;
     private string $section = '';
     private string $method = '';
     private string $request = '';
-    private string $status = '';
     private string $info = '';
+    private string $status = 'SUCCESS';
 
-    public function __construct(array $context = [])
+    public function __construct(array $logData = [])
     {
-        $this->context = $context;
+        // Совместимость сигнатуры с корпоративным Logger
     }
 
-    public function setSection(string $section): void
+    public function setSection(string $section): self
     {
         $this->section = $section;
+        return $this;
     }
-    public function setMethod(string $method): void
+
+    public function setMethod(string $method): self
     {
         $this->method = $method;
+        return $this;
     }
-    public function setRequest(string $request): void
+
+    public function setRequest(string $request): self
     {
         $this->request = $request;
+        return $this;
     }
-    public function setStatus(string $status): void
+
+    public function setStatus(string $status): self
     {
         $this->status = $status;
+        return $this;
     }
-    public function setInfo(string $info): void
+
+    public function setInfo(string $info): self
     {
         $this->info = $info;
+        return $this;
+    }
+
+    public function log(): void
+    {
+        // Standalone: пишем в файл или никуда — главное, сигнатура совпадает
+        // В тестах реальная запись не нужна (SpyInterpreter перехватывает emitLog)
     }
 
     /**
-     * Пишет запись лога в файл
-     * 
-     * @return void
+     * Получить состояние — для отладки/тестов
      */
-    public function log(): void
+    public function getLogData(): array
     {
-        $dir = defined('INTERPRETER_LOG_DIR') ? INTERPRETER_LOG_DIR : sys_get_temp_dir();
-
-        $line = json_encode([
-            'ts' => date('c'),
+        return [
             'section' => $this->section,
-            'method' => $this->method,
-            'status' => $this->status,
-            'info' => $this->info,
+            'method'  => $this->method,
             'request' => $this->request,
-            'context' => $this->context
-        ], JSON_UNESCAPED_UNICODE);
-
-        @file_put_contents($dir . '/interpreter.log', $line . PHP_EOL, FILE_APPEND | LOCK_EX);
+            'info'    => $this->info,
+            'status'  => $this->status,
+        ];
     }
 }
