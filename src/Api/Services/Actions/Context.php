@@ -208,19 +208,22 @@ class Context
      * @param string $message Текст ошибки
      * @param string $detailedDetails Подробные детали (exception message)
      * @param array|null $trace Укороченный стектрейс
+     * @param array|null $errorContext Контекст ошибки (class/method/resolved_params)
      * @return void
      */
     public function setError(
         string $configPath,
         string $message,
         string $detailedDetails = '',
-        ?array $trace = null
+        ?array $trace = null,
+        ?array $errorContext = null
     ): void {
         $this->error = [
             'config_path' => $configPath,
             'message' => $message,
             'detailed_message' => $detailedDetails,
             'trace' => $trace ?? $this->getShortTrace(),
+            'error_context' => $errorContext,
             'iteration' => $this->iterationIndex,
             'timestamp' => date('Y-m-d H:i:s.u')
         ];

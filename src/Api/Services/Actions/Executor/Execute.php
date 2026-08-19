@@ -6,6 +6,7 @@ use Api\Services\Actions\Context;
 use Api\Services\Actions\Resolver\Field;
 use Api\Services\Actions\Resolver\Condition;
 use Api\Services\Actions\Resolver\Method;
+use Api\Services\Actions\Exception\Execution as ExecutionException;
 
 /**
  * Class Execute
@@ -395,10 +396,16 @@ class Execute
                 'action' => $action
             ]);
 
+            $errorContext = ($e instanceof ExecutionException)
+                ? $e->getErrorContext()
+                : null;
+
             $this->context->setError(
                 "execute.actions[{$actionIndex}].method",
                 "Ошибка выполнения действия",
-                $e->getMessage()
+                $e->getMessage(),
+                null,
+                $errorContext
             );
         }
     }

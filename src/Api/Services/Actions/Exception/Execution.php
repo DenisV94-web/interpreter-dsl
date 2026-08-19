@@ -31,6 +31,14 @@ class Execution extends \RuntimeException
     private ?int $iteration;
 
     /**
+     * Контекст ошибки: class/method/resolved_params для отладки.
+     * Заполняется при ошибках вызовов методов, пишется в лог без обрезания.
+     * 
+     * @var array|null
+     */
+    private ?array $errorContext;
+
+    /**
      * Execution constructor.
      * 
      * @param string $message Текст ошибки
@@ -38,16 +46,19 @@ class Execution extends \RuntimeException
      * @param int|null $iteration Индекс итерации
      * @param int $code Код ошибки
      * @param \Throwable|null $previous Предыдущее исключение
+     * @param array|null $errorContext Контекст ошибки (class/method/resolved_params)
      */
     public function __construct(
         string $message,
         string $configPath = '',
         ?int $iteration = null,
         int $code = 0,
-        ?\Throwable $previous = null
+        ?\Throwable $previous = null,
+        ?array $errorContext = null
     ) {
         $this->configPath = $configPath;
         $this->iteration = $iteration;
+        $this->errorContext = $errorContext;
 
         // Формируем полное сообщение
         $fullMessage = "Ошибка выполнения";
@@ -83,5 +94,15 @@ class Execution extends \RuntimeException
     public function getIteration(): ?int
     {
         return $this->iteration;
+    }
+
+    /**
+     * Возвращает контекст ошибки (class/method/resolved_params)
+     * 
+     * @return array|null
+     */
+    public function getErrorContext(): ?array
+    {
+        return $this->errorContext;
     }
 }

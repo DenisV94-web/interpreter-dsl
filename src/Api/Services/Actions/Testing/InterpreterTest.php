@@ -24,7 +24,7 @@ use Api\Services\Actions\Interpreter;
  * 
  * Лог: Interpreter_YYYY-MM-DD_HH-II-SS.log
  * 
- * Всего тестов: 11
+ * Всего тестов: 21
  * 
  * @package Api\Services\Actions\Testing
  */
@@ -107,6 +107,14 @@ class InterpreterTest
 
         // params
         $this->testParamsAvailableEverywhere();
+
+        // Умное логирование (v1.4.0)
+        $this->testErrorContextCapturedInLog();
+        $this->testMaxLogSizeTruncatesComputed();
+        $this->testLogResponseAutoForIterative();
+        $this->testLogResponseAutoFalseForSingle();
+        $this->testLogResponseExplicitTrue();
+        $this->testSnapshotModeErrorsOnly();
 
         $this->logger->summary($this->passed, $this->failed);
 
@@ -925,6 +933,338 @@ class InterpreterTest
             ['check' => 'log.params']
         );
     }
+
+        // ========================================================
+    // УМНОЕ ЛОГИРОВАНИЕ (v1.4.0)
+    // ========================================================
+
+    /**
+     * Тест: Error Context — resolved_params упавшего вызова попадают в лог
+     * 
+     * Кейс из get_task_card: query с method, бросающим TypeError
+     * при невалидных аргументах. В логе должно быть
+     * error.error_context с class/method/resolved_params.
+     * 
+     * @return void
+     */
+    private function testErrorContextCapturedInLog(): void
+    {
+        $this->logger->separator('testErrorContextCapturedInLog');
+
+        $interpreter = new Interpreter([
+            'ctx_test' => [
+                'request' => [
+                    'main' => 'post',
+                    'query' => [
+                        'RESULT' => [
+                            'method' => 'mustBeString',
+                            'class' => MockErrorService::class,
+                            'params' => [
+                                'field:client_id',
+                                'field:client_type',
+                                'field:phone',
+                                ['field:USER.UF_DEPARTMENT'],
+                            ],
+                        ],
+                    ],
+                ],
+                'action_logic' => ['request'],
+            ],
+        ]);
+
+        $interpreter->run('ctx_test', 'test', [
+            'client_id' => '555',
+            'client_type' => 'contact',
+            'phone' => null,            // ← TypeError в mustBeString
+            'USER' => ['UF_DEPARTMENT' => [12]],
+        ]);
+
+        $logRequest = $interpreter->buildLogRequest();
+
+        // Проверка 1: error должен содержать error_context
+        $this->assert(
+            'testErrorContext_HasContext',
+            true,
+            isset($logRequest['error']['error_context']),
+            'error должен содержать error_context',
+            ['error' => $logRequest['error'] ?? null]
+        );
+
+        // Проверка 2: class и method записаны
+        $this->assert(
+            'testErrorContext_Method',
+            'mustBeString',
+            $logRequest['error']['error_context']['method'] ?? null,
+            'error_context.method должен быть именем упавшего метода',
+            ['error_context' => $logRequest['error']['error_context'] ?? null]
+        );
+
+        $this->assert(
+            'testErrorContext_Class',
+            MockErrorService::class,
+            $logRequest['error']['error_context']['class'] ?? null,
+            'error_context.class должен быть именем класса',
+            ['error_context' => $logRequest['error']['error_context'] ?? null]
+        );
+
+        // Проверка 3: resolved_params[2] (phone) = null — именно это убило метод.
+        // ВАЖНО: нельзя использовать `??` — он не отличает «ключа нет» от «значение null».
+        $resolvedParams = $logRequest['error']['error_context']['resolved_params'] ?? [];
+        $this->assert(
+            'testErrorContext_Params',
+            null,
+            array_key_exists(2, $resolvedParams) ? $resolvedParams[2] : '__missing__',
+            'resolved_params должен содержать null (аргумент, который привёл к TypeError)',
+            ['resolved_params' => $resolvedParams]
+        );
+    }
+
+    /**
+     * Тест: max_log_size — при переполнении computed обрезается
+     * 
+     * @return void
+     */
+    private function testMaxLogSizeTruncatesComputed(): void
+    {
+        $this->logger->separator('testMaxLogSizeTruncatesComputed');
+
+        $interpreter = new Interpreter([
+            'big_log' => [
+                'max_log_size' => 500,   // намеренно мало
+                'request' => [
+                    'main' => 'post',
+                    'array' => 'items',
+                    'extra' => [
+                        'big' => ['method' => 'str_repeat', 'params' => ['x', 1000]],
+                    ],
+                ],
+                'transaction' => ['enabled' => true, 'mode' => 'partial'],
+                'action_logic' => ['request'],
+            ],
+        ]);
+
+        $interpreter->run('big_log', 'test', [
+            'items' => [['a' => 1], ['a' => 2], ['a' => 3]],
+        ]);
+
+        $logRequest = $interpreter->buildLogRequest();
+        $encoded = json_encode($logRequest, JSON_UNESCAPED_UNICODE);
+
+        // Проверка 1: размер ограничен
+        $this->assert(
+            'testMaxLogSize_Size',
+            true,
+            strlen($encoded) <= 600,     // 500 + небольшой запас на _truncated
+            'Лог должен быть обрезан до max_log_size',
+            ['size' => strlen($encoded)]
+        );
+
+        // Проверка 2: флаг _truncated на месте
+        $this->assert(
+            'testMaxLogSize_HasFlag',
+            true,
+            isset($logRequest['_truncated']),
+            'Лог должен содержать флаг _truncated',
+            ['log_keys' => array_keys($logRequest)]
+        );
+
+        // Проверка 3: status/error/params не тронуты
+        $this->assert(
+            'testMaxLogSize_DataPreserved',
+            true,
+            isset($logRequest['data']),
+            'data не должен быть удалён при деградации computed',
+            ['log_keys' => array_keys($logRequest)]
+        );
+    }
+
+    /**
+     * Тест: log_response auto=true для итерационных
+     * 
+     * Без явного log_response, с request.array — response попадает в лог.
+     * 
+     * @return void
+     */
+    private function testLogResponseAutoForIterative(): void
+    {
+        $this->logger->separator('testLogResponseAutoForIterative');
+
+        $interpreter = new Interpreter([
+            'iter_resp' => [
+                'request' => [
+                    'main' => 'post',
+                    'array' => 'items',
+                ],
+                'execute' => [
+                    [
+                        'check' => 'if',
+                        'filter' => [],
+                        'actions' => [[
+                            'response' => ['id' => 'field:id'],
+                        ]],
+                    ],
+                ],
+                'transaction' => ['enabled' => true, 'mode' => 'partial'],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $interpreter->run('iter_resp', 'test', [
+            'items' => [['id' => 1], ['id' => 2]],
+        ]);
+
+        $logRequest = $interpreter->buildLogRequest();
+
+        $this->assert(
+            'testLogResponseAutoForIterative',
+            true,
+            isset($logRequest['response']) && count($logRequest['response']) === 2,
+            'log_response авто: для итерационных response попадает в лог',
+            ['response' => $logRequest['response'] ?? null]
+        );
+    }
+
+    /**
+     * Тест: log_response auto=false для одиночных
+     * 
+     * Без явного log_response, без request.array — response НЕ попадает в лог.
+     * 
+     * @return void
+     */
+    private function testLogResponseAutoFalseForSingle(): void
+    {
+        $this->logger->separator('testLogResponseAutoFalseForSingle');
+
+        $interpreter = new Interpreter([
+            'single_resp' => [
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'if',
+                        'filter' => [],
+                        'actions' => [[
+                            'response' => ['id' => 'field:id'],
+                        ]],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $interpreter->run('single_resp', 'test', ['id' => 1]);
+
+        $logRequest = $interpreter->buildLogRequest();
+
+        $this->assert(
+            'testLogResponseAutoFalseForSingle',
+            false,
+            isset($logRequest['response']),
+            'log_response авто: для одиночных response НЕ попадает в лог',
+            ['log_keys' => array_keys($logRequest)]
+        );
+    }
+
+    /**
+     * Тест: log_response=true явно для одиночного (переопределение)
+     * 
+     * @return void
+     */
+    private function testLogResponseExplicitTrue(): void
+    {
+        $this->logger->separator('testLogResponseExplicitTrue');
+
+        $interpreter = new Interpreter([
+            'single_explicit' => [
+                'log_response' => true,
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'if',
+                        'filter' => [],
+                        'actions' => [[
+                            'response' => ['id' => 'field:id'],
+                        ]],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $interpreter->run('single_explicit', 'test', ['id' => 42]);
+
+        $logRequest = $interpreter->buildLogRequest();
+
+        $this->assert(
+            'testLogResponseExplicitTrue',
+            true,
+            isset($logRequest['response']),
+            'log_response=true: переопределяет авто, response попадает в лог',
+            ['response' => $logRequest['response'] ?? null]
+        );
+    }
+
+    /**
+     * Тест: snapshot_mode=errors_only — снимки только упавших итераций
+     * 
+     * @return void
+     */
+    private function testSnapshotModeErrorsOnly(): void
+    {
+        $this->logger->separator('testSnapshotModeErrorsOnly');
+
+        $interpreter = new Interpreter([
+            'snap_mode' => [
+                'request' => [
+                    'main' => 'post',
+                    'array' => 'items',
+                    'query' => [
+                        'CONTACT' => [
+                            'method' => 'throwingGetById',
+                            'class' => MockQueryService::class,
+                            'params' => ['field:client_id'],
+                            // только итерация 1 упадёт (id=999)
+                            'conditions' => ['field:client_id' => 999],
+                        ],
+                    ],
+                ],
+                'transaction' => [
+                    'enabled' => true,
+                    'mode' => 'partial',
+                    'snapshot_mode' => 'errors_only',
+                ],
+                'action_logic' => ['request'],
+            ],
+        ]);
+
+        $interpreter->run('snap_mode', 'test', [
+            'items' => [
+                ['client_id' => 1],    // итерация 0: успех (query пропущен по conditions)
+                ['client_id' => 999],  // итерация 1: ошибка
+                ['client_id' => 2],    // итерация 2: успех
+            ],
+        ]);
+
+        $logRequest = $interpreter->buildLogRequest();
+
+        // В computed должна быть только iteration_1 (с ошибкой)
+        $iterationsInLog = array_keys($logRequest['computed'] ?? []);
+
+        $this->assert(
+            'testSnapshotModeErrorsOnly_Count',
+            1,
+            count($iterationsInLog),
+            'snapshot_mode=errors_only: в логе только упавшая итерация',
+            ['iterations' => $iterationsInLog]
+        );
+
+        $this->assert(
+            'testSnapshotModeErrorsOnly_WhichOne',
+            ['iteration_1'],
+            $iterationsInLog,
+            'В логе должна быть именно iteration_1 (с ошибкой)',
+            ['iterations' => $iterationsInLog]
+        );
+    }
     
     // ========================================================
     // УТИЛИТА ПРОВЕРКИ
@@ -1039,5 +1379,35 @@ class SpyInterpreter extends Interpreter
     protected function emitLog(string $status, string $info): void
     {
         $this->logJournal[] = ['status' => $status, 'info' => $info];
+    }
+}
+
+// ============================================================
+// МОК-КЛАСС ДЛЯ ERROR CONTEXT (v1.4.0)
+// ============================================================
+
+/**
+ * Class MockErrorService
+ * 
+ * Мок-класс для тестирования error_context.
+ * Методы с строгой типизацией, бросающие TypeError при невалидных аргументах.
+ * 
+ * @package Api\Services\Actions\Testing
+ */
+class MockErrorService
+{
+    /**
+     * Метод, требующий string в третьем аргументе.
+     * Имитация DesktopManager\Main::getEntities.
+     * 
+     * @param string $clientId
+     * @param string $clientType
+     * @param string $phone
+     * @param array $department
+     * @return array
+     */
+    public function mustBeString(string $clientId, string $clientType, string $phone, array $department): array
+    {
+        return [];
     }
 }

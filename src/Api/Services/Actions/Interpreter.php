@@ -162,6 +162,14 @@ class Interpreter
     private bool $globalErrorLogged = false;
 
     /**
+     * Ключ массива итераций текущего run() (для log_response auto).
+     * null в одиночном режиме.
+     * 
+     * @var string|null
+     */
+    private ?string $currentArrayKey = null;
+
+    /**
      * Interpreter constructor.
      * 
      * @param array $config Массив конфигураций всех действий
@@ -211,6 +219,7 @@ class Interpreter
         $this->endpoint = $endpoint;
         $this->runParams = $params ?? [];
         $this->globalErrorLogged = false;
+        $this->currentArrayKey = null;
 
         $responseHandler = new ResponseHandler();
 
@@ -241,6 +250,7 @@ class Interpreter
 
             // 4. Режим: одиночный или итерационный
             $arrayKey = $actionConfig['request']['array'] ?? null;
+            $this->currentArrayKey = $arrayKey;
 
             if ($arrayKey !== null) {
                 $this->runIterative($actionName, $actionConfig, $rawData, $arrayKey);
@@ -279,12 +289,21 @@ class Interpreter
         }
 
         // 6. Логирование результата
-        // - Критическая ошибка: уже записана в logGlobalError (ВСЕГДА,
-        //   независимо от logging) — здесь не дублируем
-        // - Штатный результат: только при logging !== false
+        // - Критическая ошибка: уже записана в logGlobalError — всегда,
+        //   независимо от logging, и не дублируется здесь
+        // - logging: false глушит ТОЛЬКО чистый SUCCESS.
+        //   Любой ERROR-исход пишется всегда:
+        //   * status ERROR (ошибка контекста: query/extra/execute)
+        //   * ошибки итераций в partial (даже при общем SUCCESS)
         if (!$this->globalErrorLogged) {
             $actionConfig = $this->config[$actionName] ?? [];
-            if ($actionConfig['logging'] ?? true) {
+            $shouldLog = $actionConfig['logging'] ?? true;
+
+            $hasErrorOutcome =
+                $responseHandler->status === 'ERROR'
+                || ($this->context !== null && !empty($this->context->iterationErrors));
+
+            if ($shouldLog || $hasErrorOutcome) {
                 $this->logResult($responseHandler);
             }
         }
@@ -481,8 +500,25 @@ class Interpreter
                 $this->executeStep($step, $actionConfig, $iterationData);
             }
 
-            // Снимок вычисленных данных итерации (для лога)
-            $this->context->snapshotIteration($index);
+            // Снимок вычисленных данных итерации (для лога).
+            // snapshot_mode определяет, какие итерации сохраняются:
+            // 'all' — все (по умолчанию, обратная совместимость)
+            // 'errors_only' — только с ошибкой
+            // 'first_last' — первая + последняя + ошибки
+            $snapshotMode = $actionConfig['transaction']['snapshot_mode'] ?? 'all';
+            $isFirst = ($index === 0);
+            $isLast = ($index === count($iterations) - 1);
+            $hasError = $this->context->hasError();
+
+            $shouldSnapshot = match ($snapshotMode) {
+                'errors_only' => $hasError,
+                'first_last' => $isFirst || $isLast || $hasError,
+                default => true,
+            };
+
+            if ($shouldSnapshot) {
+                $this->context->snapshotIteration($index);
+            }
 
             // Обработка ошибки итерации
             if ($this->context->hasError()) {
@@ -594,19 +630,20 @@ class Interpreter
     }
 
     /**
-     * Собирает структуру запроса для логирования
+     * Собирает структуру запроса для логирования.
      * 
-     * ВСЕГДА: data + params (если есть) + computed
-     * При ошибках: + error
-     * 
-     * computed:
-     * - итерационный режим: снимки iteration_N (все итерации)
-     * - одиночный режим: вычисленные поля контекста
+     * ВСЕГДА: data + params (если есть) + computed/снимки (если не обрезаны)
+     * При ошибках: + error (с error_context из упавшего вызова)
+     * При log_response: + response (auto для итерационных)
+     * При переполнении: деградация до max_log_size
      * 
      * @return array
      */
     public function buildLogRequest(): array
     {
+        $actionConfig = $this->config[$this->currentActionName] ?? [];
+        $maxLogSize = $actionConfig['max_log_size'] ?? 65535;
+
         $log = [
             'data' => $this->rawRequestData
         ];
@@ -618,40 +655,142 @@ class Interpreter
         $context = $this->context;
 
         if ($context !== null) {
-            // COMPUTED — всегда
+            // COMPUTED: снимки итераций или одиночный getComputedData
             if (!empty($context->iterationSnapshots)) {
                 $log['computed'] = [];
                 foreach ($context->iterationSnapshots as $index => $snapshot) {
                     $log['computed']['iteration_' . $index] = $snapshot;
                 }
             } else {
-                $log['computed'] = $context->getComputedData();
+                $computed = $context->getComputedData();
+                if (!empty($computed)) {
+                    $log['computed'] = $computed;
+                }
             }
 
-            // ERROR — только при наличии
+            // ERROR + ERROR_CONTEXT
             if (!empty($context->iterationErrors)) {
                 $errors = [];
                 foreach ($context->iterationErrors as $index => $error) {
-                    $errors[] = [
+                    $entry = [
                         'iteration' => $index,
                         'config_path' => $error['config_path'],
                         'message' => $error['message'],
                         'detailed_message' => $error['detailed_message']
                     ];
+                    if (!empty($error['error_context'])) {
+                        $entry['error_context'] = $error['error_context'];
+                    }
+                    $errors[] = $entry;
                 }
                 $log['error'] = (count($errors) === 1) ? $errors[0] : $errors;
             } elseif ($context->hasError()) {
                 $error = $context->error;
-                $log['error'] = [
+                $entry = [
                     'iteration' => $context->iterationIndex,
                     'config_path' => $error['config_path'],
                     'message' => $error['message'],
                     'detailed_message' => $error['detailed_message']
                 ];
+                if (!empty($error['error_context'])) {
+                    $entry['error_context'] = $error['error_context'];
+                }
+                $log['error'] = $entry;
+            }
+
+            // RESPONSE (v1.4.0): auto для итерационных, иначе по флагу
+            $logResponseFlag = $actionConfig['log_response'] ?? null;
+            $logResponse = ($logResponseFlag === null)
+                ? ($this->currentArrayKey !== null)
+                : (bool) $logResponseFlag;
+
+            if ($logResponse && !empty($context->response)) {
+                $log['response'] = $context->response;
             }
         }
 
+        // ПРЕДОХРАНИТЕЛЬ: обрезать если больше max_log_size
+        return $this->applyMaxLogSize($log, $maxLogSize);
+    }
+
+    /**
+     * Применяет деградацию лога при превышении max_log_size.
+     * 
+     * Порядок деградации (error/params/status НИКОГДА не режутся):
+     * 1. Убрать computed (снимки итераций)
+     * 2. Обрезать data
+     * 3. Обрезать response
+     * 
+     * @param array $log Собранный лог
+     * @param int $maxSize Максимальный размер в байтах
+     * @return array Возможно усечённый лог
+     */
+    private function applyMaxLogSize(array $log, int $maxSize): array
+    {
+        $encoded = json_encode($log, JSON_UNESCAPED_UNICODE);
+        if ($encoded === false || strlen($encoded) <= $maxSize) {
+            return $log;
+        }
+
+        $originalSize = strlen($encoded);
+        $log['_truncated'] = ['original_size' => $originalSize, 'max_size' => $maxSize];
+
+        // Шаг 1: убираем computed
+        if (isset($log['computed'])) {
+            unset($log['computed']);
+            $log['_truncated']['reason'] = 'computed_removed';
+            $encoded = json_encode($log, JSON_UNESCAPED_UNICODE);
+            if (strlen($encoded) <= $maxSize) {
+                return $log;
+            }
+        }
+
+        // Шаг 2: обрезаем data
+        if (isset($log['data'])) {
+            $log['data'] = $this->truncateValue($log['data'], (int)($maxSize * 0.4));
+            $log['_truncated']['reason'] = 'data_truncated';
+            $encoded = json_encode($log, JSON_UNESCAPED_UNICODE);
+            if (strlen($encoded) <= $maxSize) {
+                return $log;
+            }
+        }
+
+        // Шаг 3: обрезаем response
+        if (isset($log['response'])) {
+            $log['response'] = $this->truncateValue($log['response'], (int)($maxSize * 0.3));
+            $log['_truncated']['reason'] = 'response_truncated';
+        }
+
         return $log;
+    }
+
+    /**
+     * Рекурсивно обрезает значение до заданного размера JSON.
+     * Массивы: оставляем структуру, но обрезаем длинные строки и глубокие вложения.
+     * Скаляры: длинные строки обрезаем.
+     * 
+     * @param mixed $value Значение
+     * @param int $maxBytes Целевой размер
+     * @return mixed Обрезанное значение
+     */
+    private function truncateValue($value, int $maxBytes)
+    {
+        if (is_string($value)) {
+            if (strlen($value) > $maxBytes) {
+                return substr($value, 0, $maxBytes) . '... [truncated, original length: ' . strlen($value) . ']';
+            }
+            return $value;
+        }
+
+        if (is_array($value)) {
+            $result = [];
+            foreach ($value as $key => $item) {
+                $result[$key] = $this->truncateValue($item, (int)($maxBytes / max(count($value), 1)));
+            }
+            return $result;
+        }
+
+        return $value;
     }
 
     /**

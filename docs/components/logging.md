@@ -133,6 +133,84 @@ tests/logs/Field_2026-08-15_18-14-32.log
 
 ---
 
+## Умное логирование (v1.4.0)
+
+### Error Context
+
+При ошибке вызова метода в лог попадает `error_context` —
+**class**, **method** и **resolved_params** упавшего вызова:
+
+```json
+"error": {
+    "config_path": "request.query.ENTITIES",
+    "message": "Ошибка выполнения запроса 'ENTITIES'",
+    "detailed_message": "Argument #3 ($phone) must be of type string, null given",
+    "error_context": {
+        "class": "DesktopManager\\Main",
+        "method": "getEntities",
+        "resolved_params": ["555", "contact", null, [12]]
+    }
+}
+```
+
+Применяется ко всем ошибкам методов, независимо от `logging`.
+Большие массивы/объекты в параметрах автоматически сокращаются
+(скаляры остаются как есть).
+
+### `max_log_size` — предохранитель от переполнения
+
+```php
+'action' => [
+    'max_log_size' => 65535,  // байт, дефолт = MySQL TEXT
+],
+```
+
+При превышении лог деградирует в порядке:
+
+1. убрать `computed` (снимки итераций);
+2. обрезать `data`;
+3. обрезать `response`.
+
+**Никогда не режутся:** `status`, `error`, `error_context`, `params`.
+В лог добавляется флаг `_truncated` с `original_size`, `max_size`,
+`reason` (`computed_removed` / `data_truncated` / `response_truncated`).
+
+### `log_response` — запись ответа в лог
+
+```php
+'action' => [
+    'log_response' => null,  // null | true | false
+],
+```
+
+| Значение           | Поведение                                                |
+| ------------------ | -------------------------------------------------------- |
+| `null` (умолчание) | **Авто**: итерационные пишут `response`, одиночные — нет |
+| `true`             | всегда писать                                            |
+| `false`            | никогда не писать                                        |
+
+Кейс авто: для CRUD (add/update/delete) обычно нужно «что пришло и что ушло»,
+для GET-справочников — `response` лишний шум.
+
+### `transaction.snapshot_mode` — снимки итераций
+
+```php
+'transaction' => [
+    'mode' => 'partial',
+    'snapshot_mode' => 'errors_only',  // all | errors_only | first_last
+],
+```
+
+| Режим             | Что сохраняется в `computed.iteration_N` |
+| ----------------- | ---------------------------------------- |
+| `all` (умолчание) | все итерации (обратная совместимость)    |
+| `errors_only`     | только упавшие итерации                  |
+| `first_last`      | первая + последняя + ошибки              |
+
+Комбинируется с `max_log_size`: даже при `all` переполнение не случится.
+
+---
+
 ## Куда дальше
 
 - [Контекст и params](context.md) — откуда берутся data/params/computed

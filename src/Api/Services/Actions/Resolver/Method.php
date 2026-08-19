@@ -3,6 +3,7 @@
 namespace Api\Services\Actions\Resolver;
 
 use Api\Services\Actions\Context;
+use Api\Services\Actions\Exception\Execution as ExecutionException;
 
 /**
  * Class Method
@@ -108,7 +109,9 @@ class Method
             'resolved_params' => $resolvedParams
         ]);
 
-        // Выполняем вызов с поддержкой on_error
+        // Выполняем вызов с поддержкой on_error.
+        // При исключении без on_error бросаем ExecutionException с errorContext
+        // (class, method, resolved_params) — он попадает в лог.
         try {
             if ($className !== null) {
                 $result = $this->callClassMethod($className, $methodName, $resolvedParams);
@@ -116,9 +119,20 @@ class Method
                 $result = $this->callPhpFunction($methodName, $resolvedParams);
             }
         } catch (\Throwable $e) {
-            // Если on_error не задан — пробрасываем исключение как раньше
             if (!$hasOnError) {
-                throw $e;
+                $errorContext = [
+                    'class' => $className,
+                    'method' => $methodName,
+                    'resolved_params' => $this->truncateForContext($resolvedParams),
+                ];
+                throw new ExecutionException(
+                    $e->getMessage(),
+                    '',    // путь установит вызывающий (Request/Execute)
+                    null,
+                    0,
+                    $e,
+                    $errorContext
+                );
             }
 
             $this->context->log('INFO', 'Method', 'Исключение подавлено через on_error', [
@@ -536,6 +550,41 @@ class Method
         ]);
 
         return null;
+    }
+
+    /**
+     * Обрезает параметры для включения в error_context,
+     * чтобы большой массив/объект не раздул лог.
+     * 
+     * Скаляры оставляем как есть; массивы/объекты сокращаем до:
+     * - массивы: длина + первые 5 элементов (рекурсивно не спускаемся);
+     * - объекты: class + краткое описание.
+     * 
+     * @param array $params Разрешённые параметры
+     * @return array Усечённые параметры
+     */
+    private function truncateForContext(array $params): array
+    {
+        $result = [];
+        foreach ($params as $key => $value) {
+            if (is_scalar($value) || $value === null) {
+                $result[$key] = $value;
+            } elseif (is_array($value)) {
+                $result[$key] = [
+                    '__array__' => true,
+                    'count' => count($value),
+                    'sample' => array_slice($value, 0, 5, true),
+                ];
+            } elseif (is_object($value)) {
+                $result[$key] = [
+                    '__object__' => true,
+                    'class' => get_class($value),
+                ];
+            } else {
+                $result[$key] = '__' . gettype($value) . '__';
+            }
+        }
+        return $result;
     }
 
     /**

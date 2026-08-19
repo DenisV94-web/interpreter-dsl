@@ -5,6 +5,7 @@ namespace Api\Services\Actions\Executor;
 use Api\Services\Actions\Context;
 use Api\Services\Actions\Resolver\Field;
 use Api\Services\Actions\Resolver\Condition;
+use Api\Services\Actions\Exception\Execution as ExecutionException;
 
 /**
  * Class Mapping
@@ -15,14 +16,14 @@ use Api\Services\Actions\Resolver\Condition;
  * Поддерживает три режима работы (определяются автоматически по структуре конфига):
  * 
  * ============================================================================
- * РЕЖИМ 1: ОДИНОЧНЫЙ
+ * РЕЖИМ 1: ОДИНОЧНЫЙ (create_lead)
  * ============================================================================
  * Плоский массив целевое_поле => выражение.
  * Все значения записываются в контекст и в context.mapping (для 'mapping' placeholder в execute).
  * 
  * Конфиг:
  * [
- *     'UF_FIELD_ID' => 'field:field_id',
+ *     'UF_UNIFIED_CLIENT_ID' => 'field:unified_client_id',
  *     'PHONE' => 'field:CONTACT.PHONE|field:COMPANY_PHONE.VALUE',
  *     'FM' => [
  *         'PHONE' => ['n0' => ['VALUE_TYPE' => 'WORK', 'VALUE' => 'field:CONTACT_PHONE.VALUE']]
@@ -32,7 +33,7 @@ use Api\Services\Actions\Resolver\Condition;
  * Результат: массив mapping, доступен через 'mapping' в execute
  * 
  * ============================================================================
- * РЕЖИМ 2: ИМЕНОВАННЫЕ СПИСОЧНЫЕ МАППИНГИ
+ * РЕЖИМ 2: ИМЕНОВАННЫЕ СПИСОЧНЫЕ МАППИНГИ (get_dashboard_data)
  * ============================================================================
  * Массив именованных маппингов, каждый со своим source.
  * Каждый результат записывается в контекст под своим именем.
@@ -199,13 +200,18 @@ class Mapping
                     'config' => $mappingConfig
                 ]);
 
+                $errorContext = ($e instanceof ExecutionException)
+                    ? $e->getErrorContext()
+                    : null;
+
                 $this->context->setError(
                     "mapping.{$mappingName}",
                     "Ошибка обработки маппинга '{$mappingName}'",
-                    $e->getMessage()
+                    $e->getMessage(),
+                    null,
+                    $errorContext
                 );
 
-                // При ошибке записываем null и продолжаем
                 $allResults[$mappingName] = null;
                 $this->context->set($mappingName, null);
             }
@@ -383,10 +389,16 @@ class Mapping
                     'error' => $e->getMessage()
                 ]);
 
+                $errorContext = ($e instanceof ExecutionException)
+                    ? $e->getErrorContext()
+                    : null;
+
                 $this->context->setError(
                     "mapping.{$targetField}",
                     "Ошибка разрешения поля '{$targetField}'",
-                    $e->getMessage()
+                    $e->getMessage(),
+                    null,
+                    $errorContext
                 );
 
                 $result[$targetField] = null;

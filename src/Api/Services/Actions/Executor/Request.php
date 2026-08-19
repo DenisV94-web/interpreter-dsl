@@ -6,6 +6,7 @@ use Api\Services\Actions\Context;
 use Api\Services\Actions\Resolver\Field;
 use Api\Services\Actions\Resolver\Condition;
 use Api\Services\Actions\Resolver\Method;
+use Api\Services\Actions\Exception\Execution as ExecutionException;
 
 /**
  * Class Request
@@ -399,7 +400,6 @@ class Request
 
                 // Пишем в контекст сразу — следующие extra могут зависеть
                 $this->context->set($key, $resolved);
-
                 // Флаг no_log: значение остаётся доступным через field:,
                 // но исключается из log.computed и снимков итераций
                 if (is_array($expression) && ($expression['no_log'] ?? false) === true) {
@@ -414,10 +414,17 @@ class Request
                     'error' => $e->getMessage()
                 ]);
 
+                // Пробрасываем error_context из ExecutionException (если он)
+                $errorContext = ($e instanceof ExecutionException)
+                    ? $e->getErrorContext()
+                    : null;
+
                 $this->context->setError(
                     "request.extra.{$key}",
                     "Ошибка вычисления extra поля '{$key}'",
-                    $e->getMessage()
+                    $e->getMessage(),
+                    null,
+                    $errorContext
                 );
                 break;
             }
@@ -443,6 +450,7 @@ class Request
         }
 
         // ДОБАВЛЕНО: массив без спец-ключей — резолвим СОДЕРЖИМОЕ рекурсивно.
+        // Кейс: additional_fields = ['unified_client_id_decrypt' => 'field:client_string']
         if (is_array($expression)) {
             return $this->fieldResolver->resolveParams($expression);
         }
@@ -518,10 +526,16 @@ class Request
                     'config' => $queryConfigItem
                 ]);
 
+                $errorContext = ($e instanceof ExecutionException)
+                    ? $e->getErrorContext()
+                    : null;
+
                 $this->context->setError(
                     "request.query.{$queryName}",
                     "Ошибка выполнения запроса '{$queryName}'",
-                    $e->getMessage()
+                    $e->getMessage(),
+                    null,
+                    $errorContext
                 );
 
                 break;
@@ -537,6 +551,8 @@ class Request
      * - Строка '\Class::method' → вызов статического метода
      * - Массив с method/class/params → через Method resolver
      * 
+     * ВАЖНО: класс нельзя назвать Static (зарезервировано),
+     * используйте например \DesktopManager\StaticData
      * 
      * @param array $staticConfig Конфигурация static
      * @return void
@@ -573,10 +589,16 @@ class Request
                     'error' => $e->getMessage()
                 ]);
 
+                $errorContext = ($e instanceof ExecutionException)
+                    ? $e->getErrorContext()
+                    : null;
+
                 $this->context->setError(
                     "request.static.{$key}",
                     "Ошибка загрузки статичных данных '{$key}'",
-                    $e->getMessage()
+                    $e->getMessage(),
+                    null,
+                    $errorContext
                 );
                 break;
             }
