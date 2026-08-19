@@ -97,6 +97,13 @@ class InterpreterTest
         // Логирование
         $this->testLogRequestOnSuccess();
         $this->testLogRequestIterativeOnSuccess();
+        $this->testStaticNotInLogComputed();
+
+        // logging и критические ошибки (v1.3.1)
+        $this->testLoggingFalseSilencesSuccess();
+        $this->testLoggingFalseStillLogsCritical();
+        $this->testLoggingTrueLogsCriticalOnce();
+        $this->testLoggingTrueLogsSuccess();
 
         // params
         $this->testParamsAvailableEverywhere();
@@ -647,6 +654,202 @@ class InterpreterTest
             ['check' => 'log.computed.iteration_0.upper_value']
         );
     }
+
+    // ========================================================
+    // LOGGING И КРИТИЧЕСКИЕ ОШИБКИ (v1.3.1)
+    // ========================================================
+
+    /**
+     * Тест: logging=false + успех — в Logger тишина
+     * 
+     * @return void
+     */
+    private function testLoggingFalseSilencesSuccess(): void
+    {
+        $this->logger->separator('testLoggingFalseSilencesSuccess');
+
+        $interpreter = new SpyInterpreter([
+            'quiet_ok' => [
+                'logging' => false,
+                'request' => ['main' => 'post'],
+                'action_logic' => ['request'],
+            ],
+        ]);
+
+        $interpreter->run('quiet_ok', 'test', ['a' => 1]);
+
+        $this->assert(
+            'testLoggingFalseSilencesSuccess',
+            0,
+            count($interpreter->logJournal),
+            'logging=false: штатный успех не логируется',
+            ['journal' => $interpreter->logJournal]
+        );
+    }
+
+    /**
+     * Тест: logging=false + критическая ошибка — Logger пишет ВСЕГДА
+     * 
+     * action_logic ссылается на отсутствующий блок mapping
+     * → ConfigException в глобальном catch.
+     * 
+     * @return void
+     */
+    private function testLoggingFalseStillLogsCritical(): void
+    {
+        $this->logger->separator('testLoggingFalseStillLogsCritical');
+
+        $interpreter = new SpyInterpreter([
+            'quiet_bad' => [
+                'logging' => false,
+                'request' => ['main' => 'post'],
+                'action_logic' => ['request', 'mapping'],   // mapping нет → ConfigException
+            ],
+        ]);
+
+        $response = $interpreter->run('quiet_bad', 'test', []);
+
+        $this->assert(
+            'testLoggingFalseStillLogsCritical_Count',
+            1,
+            count($interpreter->logJournal),
+            'logging=false: критическая ошибка залогирована ровно один раз',
+            ['journal' => $interpreter->logJournal]
+        );
+
+        $this->assert(
+            'testLoggingFalseStillLogsCritical_Status',
+            'ERROR',
+            $interpreter->logJournal[0]['status'] ?? null,
+            'Критическая запись имеет статус ERROR',
+            ['journal' => $interpreter->logJournal]
+        );
+
+        $this->assert(
+            'testLoggingFalseStillLogsCritical_Response',
+            'ERROR',
+            $response->status,
+            'Ответ клиенту тоже ERROR (поведение не изменилось)',
+            ['status' => $response->status]
+        );
+    }
+
+    /**
+     * Тест: logging=true + критическая ошибка — ровно ОДНА запись
+     * (раньше было две: logGlobalError + logResult)
+     * 
+     * @return void
+     */
+    private function testLoggingTrueLogsCriticalOnce(): void
+    {
+        $this->logger->separator('testLoggingTrueLogsCriticalOnce');
+
+        $interpreter = new SpyInterpreter([
+            'loud_bad' => [
+                'request' => ['main' => 'post'],
+                'action_logic' => ['request', 'mapping'],
+            ],
+        ]);
+
+        $interpreter->run('loud_bad', 'test', []);
+
+        $this->assert(
+            'testLoggingTrueLogsCriticalOnce',
+            1,
+            count($interpreter->logJournal),
+            'logging=true: критическая ошибка не дублируется',
+            ['journal' => $interpreter->logJournal]
+        );
+    }
+
+    /**
+     * Тест: logging=true (по умолчанию) + успех — одна запись SUCCESS
+     * 
+     * @return void
+     */
+    private function testLoggingTrueLogsSuccess(): void
+    {
+        $this->logger->separator('testLoggingTrueLogsSuccess');
+
+        $interpreter = new SpyInterpreter([
+            'loud_ok' => [
+                'request' => ['main' => 'post'],
+                'action_logic' => ['request'],
+            ],
+        ]);
+
+        $interpreter->run('loud_ok', 'test', ['a' => 1]);
+
+        $this->assert(
+            'testLoggingTrueLogsSuccess_Count',
+            1,
+            count($interpreter->logJournal),
+            'logging=true: штатный успех логируется одной записью',
+            ['journal' => $interpreter->logJournal]
+        );
+
+        $this->assert(
+            'testLoggingTrueLogsSuccess_Status',
+            'SUCCESS',
+            $interpreter->logJournal[0]['status'] ?? null,
+            'Запись имеет статус SUCCESS',
+            ['journal' => $interpreter->logJournal]
+        );
+    }
+
+    /**
+     * Тест: static не попадает в log.computed
+     */
+    private function testStaticNotInLogComputed(): void
+    {
+        $this->logger->separator('testStaticNotInLogComputed');
+
+        $config = [
+            'static_action' => [
+                'request' => [
+                    'main' => 'post',
+                    'static' => [
+                        'business_lines' => ['NEW_CAR' => 'Новый авто']
+                    ],
+                    'extra' => [
+                        'some_value' => ['method' => 'strtoupper', 'params' => ['hello']]
+                    ]
+                ],
+                'action_logic' => ['request']
+            ]
+        ];
+
+        $interpreter = new Interpreter($config);
+        $interpreter->setTestMode(['input' => 'x']);
+        $interpreter->run('static_action', 'desktop_manager');
+
+        $log = $interpreter->buildLogRequest();
+        $computed = $log['computed'] ?? [];
+
+        $this->assert(
+            'testStatic_Excluded',
+            false,
+            array_key_exists('business_lines', $computed),
+            'Static данные не должны попадать в computed',
+            ['check' => 'computed.business_lines отсутствует']
+        );
+
+        $this->assert(
+            'testStatic_ExtraIncluded',
+            'HELLO',
+            $computed['some_value'] ?? null,
+            'Extra данные должны оставаться в computed',
+            ['check' => 'computed.some_value']
+        );
+
+        $this->assert(
+            'testStatic_AvailableInContext',
+            ['NEW_CAR' => 'Новый авто'],
+            $interpreter->getContext()->get('business_lines'),
+            'Static данные доступны в контексте через field:',
+            ['check' => 'context.business_lines']
+        );
+    }
     
     // ========================================================
     // PARAMS (тест 10)
@@ -720,60 +923,6 @@ class InterpreterTest
             $log['params'] ?? null,
             'params должны быть видны в логе buildLogRequest',
             ['check' => 'log.params']
-        );
-    }
-
-    /**
-     * Тест: static не попадает в log.computed
-     */
-    private function testStaticNotInLogComputed(): void
-    {
-        $this->logger->separator('testStaticNotInLogComputed');
-
-        $config = [
-            'static_action' => [
-                'request' => [
-                    'main' => 'post',
-                    'static' => [
-                        'business_lines' => ['NEW_CAR' => 'Новый авто']
-                    ],
-                    'extra' => [
-                        'some_value' => ['method' => 'strtoupper', 'params' => ['hello']]
-                    ]
-                ],
-                'action_logic' => ['request']
-            ]
-        ];
-
-        $interpreter = new Interpreter($config);
-        $interpreter->setTestMode(['input' => 'x']);
-        $interpreter->run('static_action', 'desktop_manager');
-
-        $log = $interpreter->buildLogRequest();
-        $computed = $log['computed'] ?? [];
-
-        $this->assert(
-            'testStatic_Excluded',
-            false,
-            array_key_exists('business_lines', $computed),
-            'Static данные не должны попадать в computed',
-            ['check' => 'computed.business_lines отсутствует']
-        );
-
-        $this->assert(
-            'testStatic_ExtraIncluded',
-            'HELLO',
-            $computed['some_value'] ?? null,
-            'Extra данные должны оставаться в computed',
-            ['check' => 'computed.some_value']
-        );
-
-        $this->assert(
-            'testStatic_AvailableInContext',
-            ['NEW_CAR' => 'Новый авто'],
-            $interpreter->getContext()->get('business_lines'),
-            'Static данные доступны в контексте через field:',
-            ['check' => 'context.business_lines']
         );
     }
     
@@ -855,5 +1004,40 @@ class MockInterpreterService
     public function getMappingData(array $mappingData): array
     {
         return $mappingData;
+    }
+}
+
+// ============================================================
+// ШПИОН ДЛЯ ЛОГИРОВАНИЯ (v1.3.1)
+// ============================================================
+
+/**
+ * Class SpyInterpreter
+ * 
+ * Interpreter с журналом вместо реального Logger:
+ * переопределяет emitLog и копит вызовы, ничего не записывая.
+ * Работает одинаково на ПК и сервере (не зависит от реализации Logger).
+ * 
+ * @package Api\Services\Actions\Testing
+ */
+class SpyInterpreter extends Interpreter
+{
+    /**
+     * Журнал вызовов emitLog: [['status' => ..., 'info' => ...], ...]
+     * 
+     * @var array
+     */
+    public array $logJournal = [];
+
+    /**
+     * Вместо записи в Logger — запись в журнал
+     * 
+     * @param string $status Статус
+     * @param string $info Сообщение
+     * @return void
+     */
+    protected function emitLog(string $status, string $info): void
+    {
+        $this->logJournal[] = ['status' => $status, 'info' => $info];
     }
 }

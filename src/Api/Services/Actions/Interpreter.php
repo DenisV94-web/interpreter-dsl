@@ -154,6 +154,14 @@ class Interpreter
     private ?Logger $logger = null;
 
     /**
+     * Флаг: глобальная ошибка уже залогирована в текущем run().
+     * Защищает logResult от дублирования критической записи.
+     * 
+     * @var bool
+     */
+    private bool $globalErrorLogged = false;
+
+    /**
      * Interpreter constructor.
      * 
      * @param array $config Массив конфигураций всех действий
@@ -202,6 +210,7 @@ class Interpreter
         $this->currentActionName = $actionName;
         $this->endpoint = $endpoint;
         $this->runParams = $params ?? [];
+        $this->globalErrorLogged = false;
 
         $responseHandler = new ResponseHandler();
 
@@ -269,11 +278,15 @@ class Interpreter
             $this->logGlobalError($e->getMessage());
         }
 
-        // 6. Логирование результата (всегда)
-        $actionConfig = $this->config[$actionName] ?? [];
-        $shouldLog = $actionConfig['logging'] ?? true;
-        if ($shouldLog) {
-            $this->logResult($responseHandler);
+        // 6. Логирование результата
+        // - Критическая ошибка: уже записана в logGlobalError (ВСЕГДА,
+        //   независимо от logging) — здесь не дублируем
+        // - Штатный результат: только при logging !== false
+        if (!$this->globalErrorLogged) {
+            $actionConfig = $this->config[$actionName] ?? [];
+            if ($actionConfig['logging'] ?? true) {
+                $this->logResult($responseHandler);
+            }
         }
 
         return $responseHandler;
@@ -642,44 +655,47 @@ class Interpreter
     }
 
     /**
-     * Логирует ГЛОБАЛЬНУЮ ошибку (catch-блок)
+     * Логирует ГЛОБАЛЬНУЮ ошибку (catch-блок).
+     * 
+     * Критические ошибки пишутся ВСЕГДА, независимо от флага logging:
+     * logging: false глушит только штатную работу и ошибки итераций.
      * 
      * @param string $message Текст ошибки
      * @return void
      */
     private function logGlobalError(string $message): void
     {
-        if ($this->logger === null) {
-            return;
-        }
+        $this->globalErrorLogged = true;
 
-        // ДОБАВЛЕНО: проверяем флаг logging
-        if (isset($this->config[$this->currentActionName])) {
-            $actionConfig = $this->config[$this->currentActionName];
-            $shouldLog = $actionConfig['logging'] ?? true;
-            if (!$shouldLog) {
-                return;
-            }
-        }
-
-        $this->logger->setSection($this->getLogSection());
-        $this->logger->setMethod($this->getLogMethod());
-        $this->logger->setRequest(json_encode(
-            $this->buildLogRequest(),
-            JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT
-        ));
-        $this->logger->setStatus('ERROR');
-        $this->logger->setInfo($message);
-        $this->logger->log();
+        $this->emitLog('ERROR', $message);
     }
 
     /**
-     * Логирует результат выполнения (SUCCESS или ERROR)
+     * Логирует результат выполнения (SUCCESS или ERROR контекста).
+     * Вызывается только для штатных исходов; критика идёт через logGlobalError.
      * 
      * @param ResponseHandler $responseHandler Обработчик ответа
      * @return void
      */
     private function logResult(ResponseHandler $responseHandler): void
+    {
+        $this->emitLog(
+            $responseHandler->status,
+            $responseHandler->message ?: 'OK'
+        );
+    }
+
+    /**
+     * Единственная точка записи в Logger.
+     * 
+     * protected — чтобы тесты могли переопределить (SpyInterpreter)
+     * и проверять логирование без реального Logger и без сети/БД.
+     * 
+     * @param string $status Статус (SUCCESS / ERROR)
+     * @param string $info Сообщение
+     * @return void
+     */
+    protected function emitLog(string $status, string $info): void
     {
         if ($this->logger === null) {
             return;
@@ -691,8 +707,8 @@ class Interpreter
             $this->buildLogRequest(),
             JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT
         ));
-        $this->logger->setStatus($responseHandler->status);
-        $this->logger->setInfo($responseHandler->message ?: 'OK');
+        $this->logger->setStatus($status);
+        $this->logger->setInfo($info);
         $this->logger->log();
     }
 
