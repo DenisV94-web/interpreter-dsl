@@ -58,6 +58,14 @@ class Method
     private Field $fieldResolver;
 
     /**
+     * Журнал построенных экземпляров для error_context:
+     * [ ['class' => ..., 'args' => ...], ... ] в порядке построения
+     * 
+     * @var array
+     */
+    private array $constructLog = [];
+
+    /**
      * Method constructor.
      * 
      * @param Context $context Контекст выполнения
@@ -88,6 +96,7 @@ class Method
         $element = $config['element'] ?? null;
         $hasOnError = array_key_exists('on_error', $config);
         $onError = $config['on_error'] ?? null;
+        $this->constructLog = [];
 
         $this->context->log('INFO', 'Method', 'Начало выполнения', [
             'method' => $methodName,
@@ -114,7 +123,12 @@ class Method
         // (class, method, resolved_params) — он попадает в лог.
         try {
             if ($className !== null) {
-                $result = $this->callClassMethod($className, $methodName, $resolvedParams);
+                $result = $this->callClassMethod(
+                    $className,
+                    $methodName,
+                    $resolvedParams,
+                    $config['construct'] ?? []
+                );
             } else {
                 $result = $this->callPhpFunction($methodName, $resolvedParams);
             }
@@ -125,6 +139,10 @@ class Method
                     'method' => $methodName,
                     'resolved_params' => $this->truncateForContext($resolvedParams),
                 ];
+                // Цепочка построения экземпляров (если использовался construct)
+                if (!empty($this->constructLog)) {
+                    $errorContext['construct'] = $this->constructLog;
+                }
                 throw new ExecutionException(
                     $e->getMessage(),
                     '',    // путь установит вызывающий (Request/Execute)
@@ -442,8 +460,12 @@ class Method
      * @return mixed Результат
      * @throws \RuntimeException Если класс или метод не найдены
      */
-    private function callClassMethod(string $className, string $methodName, array $params)
-    {
+    private function callClassMethod(
+        string $className,
+        string $methodName,
+        array $params,
+        array $constructConfig = []
+    ) {
         $this->context->log('INFO', 'Method', "Вызов метода класса", [
             'class' => $className,
             'method' => $methodName,
@@ -477,8 +499,8 @@ class Method
                 // Статический вызов: ClassName::method()
                 $result = $className::$methodName(...$params);
             } else {
-                // Вызов через экземпляр: (new ClassName())->method()
-                $instance = new $className();
+                // Вызов через экземпляр с учётом 'construct' (v1.6.0)
+                $instance = $this->buildInstance($className, $constructConfig);
                 $result = $instance->$methodName(...$params);
             }
 
@@ -585,6 +607,94 @@ class Method
             }
         }
         return $result;
+    }
+
+    /**
+     * Строит экземпляр класса с учётом 'construct' (v1.6.0).
+     * 
+     * Если construct не указан, а у конструктора есть обязательные
+     * параметры — бросает ошибку со списком параметров и подсказкой.
+     * 
+     * @param string $className Имя класса
+     * @param array $constructConfig Конфиг аргументов конструктора
+     * @return object Экземпляр
+     * @throws \RuntimeException Если класс не найден или нет обязательных параметров
+     */
+    private function buildInstance(string $className, array $constructConfig): object
+    {
+        if (!class_exists($className)) {
+            throw new \RuntimeException("Class not found: {$className}");
+        }
+
+        $args = $this->resolveConstructArgs($constructConfig);
+
+        // Диагностика: обязательные параметры конструктора без construct
+        if (empty($constructConfig)) {
+            $ctor = (new \ReflectionClass($className))->getConstructor();
+
+            if ($ctor !== null) {
+                $required = [];
+                foreach ($ctor->getParameters() as $param) {
+                    if (!$param->isOptional() && !$param->isVariadic()) {
+                        $required[] = '$' . $param->getName();
+                    }
+                }
+
+                if (!empty($required)) {
+                    throw new \RuntimeException(
+                        "Класс {$className} имеет конструктор с обязательными параметрами ("
+                            . implode(', ', $required)
+                            . ") — укажите 'construct' => [...] в конфигурации вызова"
+                    );
+                }
+            }
+        }
+
+        $instance = new $className(...$args);
+
+        // В error_context — цепочка построенных экземпляров
+        $this->constructLog[] = [
+            'class' => $className,
+            'args'  => $this->truncateForContext($args),
+        ];
+
+        $this->context->log('SUCCESS', 'Method', "Построен экземпляр: {$className}", [
+            'args' => $this->truncateForContext($args),
+        ]);
+
+        return $instance;
+    }
+
+    /**
+     * Разрешает аргументы конструктора (v1.6.0).
+     * 
+     * Правила элемента:
+     * - массив с ключом 'new' → рекурсивно строим экземпляр;
+     * - массив без 'new' → resolveParams (рекурсия field:);
+     * - скаляр → resolve (field:, {{ }}, литерал).
+     * 
+     * @param array $argsConfig Конфиг аргументов
+     * @return array Разрешённые аргументы
+     */
+    private function resolveConstructArgs(array $argsConfig): array
+    {
+        $resolved = [];
+
+        foreach ($argsConfig as $key => $arg) {
+            if (is_array($arg) && isset($arg['new'])) {
+                $resolved[$key] = $this->buildInstance(
+                    (string) $arg['new'],
+                    $arg['construct'] ?? []
+                );
+                continue;
+            }
+
+            $resolved[$key] = is_array($arg)
+                ? $this->resolveParams($arg)
+                : $this->fieldResolver->resolve($arg);
+        }
+
+        return $resolved;
     }
 
     /**

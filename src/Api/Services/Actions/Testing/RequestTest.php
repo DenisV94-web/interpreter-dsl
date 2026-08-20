@@ -118,6 +118,12 @@ class RequestTest
         $this->testNoLogAbsentFieldVisible();
         $this->testNoLogWorksInCompose();
 
+        // construct (v1.6.0)
+        $this->testConstructScalarArgs();
+        $this->testConstructNestedFourLevels();
+        $this->testConstructMissingRequired();
+        $this->testConstructBackCompat();
+
         $this->logger->summary($this->passed, $this->failed);
 
         echo "\n";
@@ -620,6 +626,160 @@ class RequestTest
         );
     }
 
+        // ========================================================
+    // CONSTRUCT (v1.6.0)
+    // ========================================================
+
+    /**
+     * Тест: construct со скалярными аргументами (field: + литерал)
+     * 
+     * @return void
+     */
+    private function testConstructScalarArgs(): void
+    {
+        $this->logger->separator('testConstructScalarArgs');
+
+        [$request, $context] = $this->createRequest([]);
+
+        $request->execute([
+            'main' => 'post',
+            'query' => [
+                'RESULT' => [
+                    'method' => 'tag',
+                    'class' => MockCtorService::class,
+                    'construct' => ['field:block_name', 5],
+                ],
+            ],
+        ], ['block_name' => 'leads']);
+
+        $this->assert(
+            'testConstructScalarArgs',
+            'leads:5',
+            $context->get('RESULT'),
+            'construct: аргументы конструктора резолвятся из field: и литералов',
+            ['construct' => ['field:block_name', 5]]
+        );
+    }
+
+    /**
+     * Тест: 4 уровня вложенных экземпляров через new
+     * 
+     * @return void
+     */
+    private function testConstructNestedFourLevels(): void
+    {
+        $this->logger->separator('testConstructNestedFourLevels');
+
+        [$request, $context] = $this->createRequest([]);
+
+        $request->execute([
+            'main' => 'post',
+            'query' => [
+                'RESULT' => [
+                    'method' => 'run',
+                    'class' => MockCtorLevel4Root::class,
+                    'construct' => [
+                        [   // уровень 2
+                            'new' => MockCtorLevel3::class,
+                            'construct' => [
+                                [   // уровень 3
+                                    'new' => MockCtorNested::class,
+                                    'construct' => [
+                                        [   // уровень 4
+                                            'new' => MockCtorService::class,
+                                            'construct' => ['field:block_name', 7],
+                                        ],
+                                        'field:suffix',
+                                    ],
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ], ['block_name' => 'tasks', 'suffix' => 'ok']);
+
+        $this->assert(
+            'testConstructNestedFourLevels',
+            'L4:L3:tasks:7/ok',
+            $context->get('RESULT'),
+            'construct: 4 уровня вложенности строятся изнутри наружу',
+            ['levels' => 4]
+        );
+    }
+
+    /**
+     * Тест: нет construct + обязательные параметры конструктора
+     * → понятная ошибка с подсказкой
+     * 
+     * @return void
+     */
+    private function testConstructMissingRequired(): void
+    {
+        $this->logger->separator('testConstructMissingRequired');
+
+        [$request, $context] = $this->createRequest([]);
+
+        $request->execute([
+            'main' => 'post',
+            'query' => [
+                'RESULT' => [
+                    'method' => 'tag',
+                    'class' => MockCtorService::class,
+                    // construct НЕ указан
+                ],
+            ],
+        ], []);
+
+        $this->assert(
+            'testConstructMissingRequired_HasError',
+            true,
+            $context->hasError(),
+            'Без construct обязательный параметр конструктора = ошибка',
+            ['error' => $context->error]
+        );
+
+        $this->assert(
+            'testConstructMissingRequired_Hint',
+            true,
+            strpos($context->error['detailed_message'] ?? '', 'construct') !== false,
+            'В ошибке — подсказка про construct и список параметров',
+            ['detailed' => $context->error['detailed_message'] ?? null]
+        );
+    }
+
+    /**
+     * Тест: обратная совместимость — класс без обязательного
+     * конструктора работает без construct как раньше
+     * 
+     * @return void
+     */
+    private function testConstructBackCompat(): void
+    {
+        $this->logger->separator('testConstructBackCompat');
+
+        [$request, $context] = $this->createRequest([]);
+
+        $request->execute([
+            'main' => 'post',
+            'query' => [
+                'CONTACT' => [
+                    'method' => 'getMockContact',
+                    'class' => MockQueryService::class,
+                    'params' => ['field:client_id'],
+                ],
+            ],
+        ], ['client_id' => 123]);
+
+        $this->assert(
+            'testConstructBackCompat',
+            ['ID' => 123, 'NAME' => 'Test Contact'],
+            $context->get('CONTACT'),
+            'Без construct поведение не изменилось (new Class())',
+            ['class' => 'MockQueryService']
+        );
+    }
+
 
     // ========================================================
     // УТИЛИТА ПРОВЕРКИ
@@ -745,5 +905,67 @@ class MockEnrichmentService
         unset($task);
 
         return $tasks;
+    }
+}
+
+// ============================================================
+// МОКИ ДЛЯ CONSTRUCT (v1.6.0) — цепочка из 4 уровней
+// ============================================================
+
+/**
+ * Уровень 4 (лист): конструктор со скалярами
+ */
+class MockCtorService
+{
+    public function __construct(
+        public string $block,
+        public int $limit = 10
+    ) {}
+
+    public function tag(): string
+    {
+        return $this->block . ':' . $this->limit;
+    }
+}
+
+/**
+ * Уровень 3: принимает экземпляр MockCtorService
+ */
+class MockCtorNested
+{
+    public function __construct(
+        public MockCtorService $inner,
+        public string $suffix
+    ) {}
+
+    public function deep(): string
+    {
+        return $this->inner->tag() . '/' . $this->suffix;
+    }
+}
+
+/**
+ * Уровень 2: принимает экземпляр MockCtorNested
+ */
+class MockCtorLevel3
+{
+    public function __construct(public MockCtorNested $mid) {}
+
+    public function top(): string
+    {
+        return 'L3:' . $this->mid->deep();
+    }
+}
+
+/**
+ * Уровень 1 (корень): принимает экземпляр MockCtorLevel3
+ */
+class MockCtorLevel4Root
+{
+    public function __construct(public MockCtorLevel3 $l3) {}
+
+    public function run(): string
+    {
+        return 'L4:' . $this->l3->top();
     }
 }
