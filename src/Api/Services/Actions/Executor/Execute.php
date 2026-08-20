@@ -147,6 +147,22 @@ class Execute
                 continue;
             }
 
+            // v1.9.0: switch-блок — ветвление по значению выражения
+            if ($check === 'switch') {
+                $matched = $this->executeSwitchBlock($block, $index);
+
+                if ($matched) {
+                    $executed = true;
+                }
+
+                if ($this->context->hasError()) {
+                    $this->context->log('ERROR', 'Execute', "Ошибка в switch-блоке #{$index}, прерывание execute");
+                    break;
+                }
+
+                continue;
+            }
+
             // Определяем нужно ли проверять условие
             $shouldExecute = false;
 
@@ -273,6 +289,90 @@ class Execute
             ]);
             return false;
         }
+    }
+
+    /**
+     * Выполняет switch-блок (v1.9.0).
+     * 
+     * Формат:
+     * [
+     *     'check' => 'switch',
+     *     'expression' => 'field:client_type',
+     *     'cases' => [
+     *         'contact' => ['actions' => [...]],
+     *         'company' => ['actions' => [...]],
+     *         'default' => ['actions' => [...]],
+     *     ],
+     * ]
+     * 
+     * Семантика:
+     * - expression резолвится через Field (field:, {{ }}, литералы);
+     * - cases проверяются в порядке конфига, сравнение слабое (==),
+     *   без fall-through — выполняется ровно один case;
+     * - 'default' — если ни один case не совпал;
+     * - ни один case не совпал и нет default → возвращает false
+     *   (цепочка if/elseif/else продолжается дальше).
+     * 
+     * @param array $block Конфигурация блока
+     * @param int $index Индекс блока
+     * @return bool True если case/default был выполнен
+     */
+    private function executeSwitchBlock(array $block, int $index): bool
+    {
+        $expression = $block['expression'] ?? null;
+        $cases = $block['cases'] ?? [];
+
+        $this->context->log('INFO', 'Execute', "Switch-блок #{$index}", [
+            'expression' => $expression,
+            'cases' => array_keys($cases),
+        ]);
+
+        if ($expression === null) {
+            $this->context->log('ERROR', 'Execute', "Switch-блок #{$index} без expression");
+            $this->context->setError(
+                "execute[{$index}].expression",
+                'Switch-блок без expression',
+                'Switch block requires "expression" key'
+            );
+            return true;
+        }
+
+        $switchValue = $this->fieldResolver->resolve($expression);
+
+        $this->context->log('INFO', 'Execute', 'Switch-значение вычислено', [
+            'value' => $switchValue,
+            'type' => gettype($switchValue),
+        ]);
+
+        foreach ($cases as $caseKey => $caseConfig) {
+            if ($caseKey === 'default') {
+                continue;
+            }
+
+            // Слабое сравнение: '1' == 1, как в фильтрах Битрикс
+            if ($switchValue == $caseKey) {
+                $this->context->log('SUCCESS', 'Execute', "Switch: совпал case '{$caseKey}'");
+
+                $actions = isset($caseConfig['actions']) ? $caseConfig['actions'] : $caseConfig;
+                $this->executeActions($actions);
+
+                return true;
+            }
+        }
+
+        if (array_key_exists('default', $cases)) {
+            $this->context->log('SUCCESS', 'Execute', "Switch: ни один case не совпал, выполняем default");
+
+            $defaultConfig = $cases['default'];
+            $actions = isset($defaultConfig['actions']) ? $defaultConfig['actions'] : $defaultConfig;
+            $this->executeActions($actions);
+
+            return true;
+        }
+
+        $this->context->log('INFO', 'Execute', "Switch-блок #{$index}: совпадений нет, default не задан");
+
+        return false;
     }
 
     /**

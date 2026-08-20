@@ -24,7 +24,7 @@ use Api\Services\Actions\Interpreter;
  * 
  * Лог: Interpreter_YYYY-MM-DD_HH-II-SS.log
  * 
- * Всего тестов: 21
+ * Всего тестов: 48
  * 
  * @package Api\Services\Actions\Testing
  */
@@ -116,6 +116,13 @@ class InterpreterTest
         $this->testLogResponseExplicitTrue();
         $this->testSnapshotModeErrorsOnly();
         $this->testLogResponseOnErrorAlways();
+
+        // switch (v1.9.0)
+        $this->testSwitchBasicMatch();
+        $this->testSwitchDefault();
+        $this->testSwitchNoMatchChainContinues();
+        $this->testSwitchConsumesChain();
+        $this->testSwitchLooseComparison();
 
         $this->logger->summary($this->passed, $this->failed);
 
@@ -1312,6 +1319,208 @@ class InterpreterTest
             isset($logResponse['error_context']),
             'Ошибка в строке ответа несёт error_context',
             []
+        );
+    }
+
+    // ========================================================
+    // SWITCH (v1.9.0)
+    // ========================================================
+
+    /**
+     * Тест: switch — совпадение case
+     * 
+     * @return void
+     */
+    private function testSwitchBasicMatch(): void
+    {
+        $this->logger->separator('testSwitchBasicMatch');
+
+        $interpreter = new Interpreter([
+            'switch_action' => [
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'switch',
+                        'expression' => 'field:client_type',
+                        'cases' => [
+                            'contact' => ['actions' => [['response' => ['branch' => 'contact']]]],
+                            'company' => ['actions' => [['response' => ['branch' => 'company']]]],
+                            'default' => ['actions' => [['response' => ['branch' => 'default']]]],
+                        ],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $responseHandler = $interpreter->run('switch_action', 'test', ['client_type' => 'contact']);
+
+        $this->assert(
+            'testSwitchBasicMatch',
+            [['branch' => 'contact']],
+            $responseHandler->response,
+            'Switch должен выполнить actions совпавшего case',
+            ['expression' => 'field:client_type', 'value' => 'contact']
+        );
+    }
+
+    /**
+     * Тест: switch — ни один case не совпал → default
+     * 
+     * @return void
+     */
+    private function testSwitchDefault(): void
+    {
+        $this->logger->separator('testSwitchDefault');
+
+        $interpreter = new Interpreter([
+            'switch_action' => [
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'switch',
+                        'expression' => 'field:client_type',
+                        'cases' => [
+                            'contact' => ['actions' => [['response' => ['branch' => 'contact']]]],
+                            'default' => ['actions' => [['response' => ['branch' => 'default']]]],
+                        ],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $responseHandler = $interpreter->run('switch_action', 'test', ['client_type' => 'other']);
+
+        $this->assert(
+            'testSwitchDefault',
+            [['branch' => 'default']],
+            $responseHandler->response,
+            'Switch без совпадений должен выполнить default',
+            ['value' => 'other']
+        );
+    }
+
+    /**
+     * Тест: switch без совпадения и без default НЕ съедает цепочку —
+     * следующий else выполняется
+     * 
+     * @return void
+     */
+    private function testSwitchNoMatchChainContinues(): void
+    {
+        $this->logger->separator('testSwitchNoMatchChainContinues');
+
+        $interpreter = new Interpreter([
+            'switch_action' => [
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'switch',
+                        'expression' => 'field:client_type',
+                        'cases' => [
+                            'contact' => ['actions' => [['response' => ['branch' => 'contact']]]],
+                        ],
+                    ],
+                    [
+                        'check' => 'else',
+                        'actions' => [['response' => ['branch' => 'else_after_switch']]],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $responseHandler = $interpreter->run('switch_action', 'test', ['client_type' => 'other']);
+
+        $this->assert(
+            'testSwitchNoMatchChainContinues',
+            [['branch' => 'else_after_switch']],
+            $responseHandler->response,
+            'Несработавший switch не должен прерывать цепочку if/elseif/else',
+            ['value' => 'other', 'default' => 'не задан']
+        );
+    }
+
+    /**
+     * Тест: сработавший switch съедает цепочку — else не выполняется
+     * 
+     * @return void
+     */
+    private function testSwitchConsumesChain(): void
+    {
+        $this->logger->separator('testSwitchConsumesChain');
+
+        $interpreter = new Interpreter([
+            'switch_action' => [
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'if',
+                        'filter' => ['field:x' => 1],
+                        'actions' => [['response' => ['branch' => 'if']]],
+                    ],
+                    [
+                        'check' => 'switch',
+                        'expression' => 'field:client_type',
+                        'cases' => [
+                            'contact' => ['actions' => [['response' => ['branch' => 'switch']]]],
+                        ],
+                    ],
+                    [
+                        'check' => 'else',
+                        'actions' => [['response' => ['branch' => 'else']]],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $responseHandler = $interpreter->run('switch_action', 'test', ['x' => 0, 'client_type' => 'contact']);
+
+        $this->assert(
+            'testSwitchConsumesChain',
+            [['branch' => 'switch']],
+            $responseHandler->response,
+            'Сработавший switch должен прерывать цепочку (else не выполняется)',
+            ['chain' => 'if(false) → switch(match) → else']
+        );
+    }
+
+    /**
+     * Тест: слабое сравнение — int 1 совпадает с case '1'
+     * 
+     * @return void
+     */
+    private function testSwitchLooseComparison(): void
+    {
+        $this->logger->separator('testSwitchLooseComparison');
+
+        $interpreter = new Interpreter([
+            'switch_action' => [
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'switch',
+                        'expression' => 'field:code',
+                        'cases' => [
+                            '1' => ['actions' => [['response' => ['branch' => 'one']]]],
+                            'default' => ['actions' => [['response' => ['branch' => 'default']]]],
+                        ],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $responseHandler = $interpreter->run('switch_action', 'test', ['code' => 1]);
+
+        $this->assert(
+            'testSwitchLooseComparison',
+            [['branch' => 'one']],
+            $responseHandler->response,
+            'Switch сравнивает слабо: int 1 совпадает с case "1"',
+            ['value' => 1, 'case' => "'1'"]
         );
     }
     
