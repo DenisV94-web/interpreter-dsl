@@ -141,6 +141,7 @@ nav:
       - Компоненты: components/architecture.md
       - Контекст и params: components/context.md
       - Логирование: components/logging.md
+      - ArrayFilter: components/array-filter.md
 
   - Примеры:
       - demo_lead и demo_card: examples/demo.md

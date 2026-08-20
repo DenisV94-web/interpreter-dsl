@@ -104,6 +104,7 @@ use Api\Services\Actions\Testing\ExecuteTest;
 use Api\Services\Actions\Testing\InterpreterTest;
 use Api\Services\Actions\Testing\CurlTest;
 use Api\Services\Actions\Testing\ComposeTest;
+use Api\Services\Actions\Testing\ArrayFilterTest;
 
 $testClasses = [
     'Field Resolver'       => FieldTest::class,
@@ -115,6 +116,7 @@ $testClasses = [
     'Interpreter (integr.)' => InterpreterTest::class,
     'Curl Executor'        => CurlTest::class,
     'Compose Executor'     => ComposeTest::class,
+    'Array Filter Service' => ArrayFilterTest::class
 ];
 
 // ============================================================
