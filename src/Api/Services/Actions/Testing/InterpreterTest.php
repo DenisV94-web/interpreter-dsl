@@ -115,6 +115,7 @@ class InterpreterTest
         $this->testLogResponseAutoFalseForSingle();
         $this->testLogResponseExplicitTrue();
         $this->testSnapshotModeErrorsOnly();
+        $this->testLogResponseOnErrorAlways();
 
         $this->logger->summary($this->passed, $this->failed);
 
@@ -979,42 +980,42 @@ class InterpreterTest
             'USER' => ['UF_DEPARTMENT' => [12]],
         ]);
 
-        $logRequest = $interpreter->buildLogRequest();
+        $logResponse = $interpreter->buildLogResponse();
 
         // Проверка 1: error должен содержать error_context
         $this->assert(
             'testErrorContext_HasContext',
             true,
-            isset($logRequest['error']['error_context']),
-            'error должен содержать error_context',
-            ['error' => $logRequest['error'] ?? null]
+            isset($logResponse['error_context']),
+            'Строка ответа при ошибке содержит error_context',
+            ['log_response' => $logResponse]
         );
 
         // Проверка 2: class и method записаны
         $this->assert(
             'testErrorContext_Method',
             'mustBeString',
-            $logRequest['error']['error_context']['method'] ?? null,
-            'error_context.method должен быть именем упавшего метода',
-            ['error_context' => $logRequest['error']['error_context'] ?? null]
+            $logResponse['error_context']['method'] ?? null,
+            'error_context.method — имя упавшего метода',
+            []
         );
 
         $this->assert(
             'testErrorContext_Class',
             MockErrorService::class,
-            $logRequest['error']['error_context']['class'] ?? null,
-            'error_context.class должен быть именем класса',
-            ['error_context' => $logRequest['error']['error_context'] ?? null]
+            $logResponse['error_context']['class'] ?? null,
+            'error_context.class — имя класса',
+            []
         );
 
         // Проверка 3: resolved_params[2] (phone) = null — именно это убило метод.
         // ВАЖНО: нельзя использовать `??` — он не отличает «ключа нет» от «значение null».
-        $resolvedParams = $logRequest['error']['error_context']['resolved_params'] ?? [];
+        $resolvedParams = $logResponse['error_context']['resolved_params'] ?? [];
         $this->assert(
             'testErrorContext_Params',
             null,
             array_key_exists(2, $resolvedParams) ? $resolvedParams[2] : '__missing__',
-            'resolved_params должен содержать null (аргумент, который привёл к TypeError)',
+            'resolved_params[2] = null — аргумент, убивший метод',
             ['resolved_params' => $resolvedParams]
         );
     }
@@ -1113,14 +1114,14 @@ class InterpreterTest
             'items' => [['id' => 1], ['id' => 2]],
         ]);
 
-        $logRequest = $interpreter->buildLogRequest();
+        $logResponse = $interpreter->buildLogResponse();
 
         $this->assert(
             'testLogResponseAutoForIterative',
-            true,
-            isset($logRequest['response']) && count($logRequest['response']) === 2,
-            'log_response авто: для итерационных response попадает в лог',
-            ['response' => $logRequest['response'] ?? null]
+            [['id' => 1], ['id' => 2]],
+            $logResponse,
+            'Итерации: строка ответа = массив записей response',
+            ['log_response' => $logResponse]
         );
     }
 
@@ -1153,14 +1154,14 @@ class InterpreterTest
 
         $interpreter->run('single_resp', 'test', ['id' => 1]);
 
-        $logRequest = $interpreter->buildLogRequest();
+        $logResponse = $interpreter->buildLogResponse();
 
         $this->assert(
             'testLogResponseAutoFalseForSingle',
-            false,
-            isset($logRequest['response']),
-            'log_response авто: для одиночных response НЕ попадает в лог',
-            ['log_keys' => array_keys($logRequest)]
+            ['status' => 'SUCCESS'],
+            $logResponse,
+            'Одиночный успех без log_response: компактная строка ответа',
+            ['log_response' => $logResponse]
         );
     }
 
@@ -1192,14 +1193,14 @@ class InterpreterTest
 
         $interpreter->run('single_explicit', 'test', ['id' => 42]);
 
-        $logRequest = $interpreter->buildLogRequest();
+        $logResponse = $interpreter->buildLogResponse();
 
         $this->assert(
             'testLogResponseExplicitTrue',
-            true,
-            isset($logRequest['response']),
-            'log_response=true: переопределяет авто, response попадает в лог',
-            ['response' => $logRequest['response'] ?? null]
+            [['id' => 42]],
+            $logResponse,
+            'log_response=true: полный response в строке ответа',
+            ['log_response' => $logResponse]
         );
     }
 
@@ -1263,6 +1264,54 @@ class InterpreterTest
             $iterationsInLog,
             'В логе должна быть именно iteration_1 (с ошибкой)',
             ['iterations' => $iterationsInLog]
+        );
+    }
+
+    /**
+     * Тест: при ERROR-исходе строка ответа ВСЕГДА содержит саму ошибку —
+     * даже для одиночного эндпоинта с logging=false
+     * 
+     * @return void
+     */
+    private function testLogResponseOnErrorAlways(): void
+    {
+        $this->logger->separator('testLogResponseOnErrorAlways');
+
+        $interpreter = new Interpreter([
+            'err_resp' => [
+                'logging' => false,
+                'request' => [
+                    'main' => 'post',
+                    'query' => [
+                        'CONTACT' => [
+                            'method' => 'throwingGetById',
+                            'class' => MockQueryService::class,
+                            'params' => ['field:client_id'],
+                        ],
+                    ],
+                ],
+                'action_logic' => ['request'],
+            ],
+        ]);
+
+        $interpreter->run('err_resp', 'test', ['client_id' => 1]);
+
+        $logResponse = $interpreter->buildLogResponse();
+
+        $this->assert(
+            'testLogResponseOnErrorAlways_Path',
+            'request.query.CONTACT',
+            $logResponse['config_path'] ?? null,
+            'При ERROR строка ответа = сама ошибка',
+            ['log_response' => $logResponse]
+        );
+
+        $this->assert(
+            'testLogResponseOnErrorAlways_Context',
+            true,
+            isset($logResponse['error_context']),
+            'Ошибка в строке ответа несёт error_context',
+            []
         );
     }
     

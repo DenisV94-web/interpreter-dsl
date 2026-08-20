@@ -118,6 +118,19 @@ class FieldTest
         $this->testTemplateBarePathAndNullEmpty();
         $this->testTemplateBarePathSingleRaw();
 
+        // Dynamic key access (v1.7.0)
+        $this->testDynamicKeyBasic();
+        $this->testDynamicKeyLiteralQuoted();
+        $this->testDynamicKeyNumeric();
+        $this->testDynamicKeyBareName();
+        $this->testDynamicKeyNestedBrackets();
+        $this->testDynamicKeyPathAfter();
+        $this->testDynamicKeyDotBefore();
+        $this->testDynamicKeyMissing();
+        $this->testDynamicKeyNullKey();
+        $this->testDynamicKeyChainWithBrackets();
+        $this->testDynamicKeyInsideTemplate();
+
         $this->logger->summary($this->passed, $this->failed);
 
         echo "\n";
@@ -906,6 +919,259 @@ class FieldTest
             $resolver->resolve('{{LEAD.EMAIL}}'),
             'Одиночный шорткат с null возвращает null',
             ['expression' => '{{LEAD.EMAIL}}']
+        );
+    }
+
+    // ========================================================
+    // DYNAMIC KEY ACCESS (v1.7.0)
+    // ========================================================
+
+    /**
+     * Тест: базовый динамический ключ field:pr_hl[field:index_code]
+     */
+    private function testDynamicKeyBasic(): void
+    {
+        $this->logger->separator('testDynamicKeyBasic');
+
+        $context = new Context([
+            'pr_hl' => ['A13' => 'Недавно проигранная сделка', 'B7' => 'Другое'],
+            'index_code' => 'A13',
+        ]);
+        $context->setTestLogger($this->logger);
+        $resolver = new Field($context);
+
+        $this->assert(
+            'testDynamicKeyBasic',
+            'Недавно проигранная сделка',
+            $resolver->resolve('field:pr_hl[field:index_code]'),
+            'Значение берётся по ключу, вычисленному из другого поля',
+            ['expression' => 'field:pr_hl[field:index_code]']
+        );
+    }
+
+    /**
+     * Тест: литерал в кавычках field:arr['NEW_CAR']
+     */
+    private function testDynamicKeyLiteralQuoted(): void
+    {
+        $this->logger->separator('testDynamicKeyLiteralQuoted');
+
+        $context = new Context([
+            'business_lines' => ['NEW_CAR' => 'Новый автомобиль'],
+        ]);
+        $context->setTestLogger($this->logger);
+        $resolver = new Field($context);
+
+        $this->assert(
+            'testDynamicKeyLiteralQuoted',
+            'Новый автомобиль',
+            $resolver->resolve("field:business_lines['NEW_CAR']"),
+            'Литеральный ключ в кавычках работает',
+            ['expression' => "field:business_lines['NEW_CAR']"]
+        );
+    }
+
+    /**
+     * Тест: числовой индекс field:list[1]
+     */
+    private function testDynamicKeyNumeric(): void
+    {
+        $this->logger->separator('testDynamicKeyNumeric');
+
+        $context = new Context(['list' => [10, 20, 30]]);
+        $context->setTestLogger($this->logger);
+        $resolver = new Field($context);
+
+        $this->assert(
+            'testDynamicKeyNumeric',
+            20,
+            $resolver->resolve('field:list[1]'),
+            'Числовой индекс работает',
+            ['expression' => 'field:list[1]']
+        );
+    }
+
+    /**
+     * Тест: голое имя в скобках = литеральный ключ
+     */
+    private function testDynamicKeyBareName(): void
+    {
+        $this->logger->separator('testDynamicKeyBareName');
+
+        $context = new Context(['arr' => ['code' => 'x']]);
+        $context->setTestLogger($this->logger);
+        $resolver = new Field($context);
+
+        $this->assert(
+            'testDynamicKeyBareName',
+            'x',
+            $resolver->resolve('field:arr[code]'),
+            'Голое имя в скобках — литеральный ключ',
+            ['expression' => 'field:arr[code]']
+        );
+    }
+
+    /**
+     * Тест: вложенные скобки (матрица) field:m[field:r][field:c]
+     */
+    private function testDynamicKeyNestedBrackets(): void
+    {
+        $this->logger->separator('testDynamicKeyNestedBrackets');
+
+        $context = new Context([
+            'm' => [['a', 'b'], ['c', 'd']],
+            'r' => 1,
+            'c' => 0,
+        ]);
+        $context->setTestLogger($this->logger);
+        $resolver = new Field($context);
+
+        $this->assert(
+            'testDynamicKeyNestedBrackets',
+            'c',
+            $resolver->resolve('field:m[field:r][field:c]'),
+            'Вложенные скобки работают (двумерный доступ)',
+            ['expression' => 'field:m[field:r][field:c]']
+        );
+    }
+
+    /**
+     * Тест: точечный путь ПОСЛЕ скобок field:arr[field:key].name
+     */
+    private function testDynamicKeyPathAfter(): void
+    {
+        $this->logger->separator('testDynamicKeyPathAfter');
+
+        $context = new Context([
+            'arr' => ['k' => ['name' => 'V']],
+            'key' => 'k',
+        ]);
+        $context->setTestLogger($this->logger);
+        $resolver = new Field($context);
+
+        $this->assert(
+            'testDynamicKeyPathAfter',
+            'V',
+            $resolver->resolve('field:arr[field:key].name'),
+            'Точечный путь после скобок работает',
+            ['expression' => 'field:arr[field:key].name']
+        );
+    }
+
+    /**
+     * Тест: точка ПЕРЕД скобками field:a.b[field:key]
+     */
+    private function testDynamicKeyDotBefore(): void
+    {
+        $this->logger->separator('testDynamicKeyDotBefore');
+
+        $context = new Context([
+            'a' => ['b' => ['k1' => 'v']],
+            'key' => 'k1',
+        ]);
+        $context->setTestLogger($this->logger);
+        $resolver = new Field($context);
+
+        $this->assert(
+            'testDynamicKeyDotBefore',
+            'v',
+            $resolver->resolve('field:a.b[field:key]'),
+            'Точечный путь перед скобками работает',
+            ['expression' => 'field:a.b[field:key]']
+        );
+    }
+
+    /**
+     * Тест: отсутствующий ключ → null
+     */
+    private function testDynamicKeyMissing(): void
+    {
+        $this->logger->separator('testDynamicKeyMissing');
+
+        $context = new Context(['arr' => [], 'key' => 'x']);
+        $context->setTestLogger($this->logger);
+        $resolver = new Field($context);
+
+        $this->assert(
+            'testDynamicKeyMissing',
+            null,
+            $resolver->resolve('field:arr[field:key]'),
+            'Отсутствующий ключ возвращает null без исключения',
+            ['expression' => 'field:arr[field:key]']
+        );
+    }
+
+    /**
+     * Тест: поле-ключ отсутствует (резолвится в null) → весь путь null
+     */
+    private function testDynamicKeyNullKey(): void
+    {
+        $this->logger->separator('testDynamicKeyNullKey');
+
+        $context = new Context(['arr' => ['a' => 1]]);
+        $context->setTestLogger($this->logger);
+        $resolver = new Field($context);
+
+        $this->assert(
+            'testDynamicKeyNullKey',
+            null,
+            $resolver->resolve('field:arr[field:missing]'),
+            'null-ключ возвращает null без fatal',
+            ['expression' => 'field:arr[field:missing]']
+        );
+    }
+
+    /**
+     * Тест: цепочка | не ломается на скобках
+     */
+    private function testDynamicKeyChainWithBrackets(): void
+    {
+        $this->logger->separator('testDynamicKeyChainWithBrackets');
+
+        $context = new Context([
+            'arr' => [],
+            'fallback' => 'found',
+        ]);
+        $context->setTestLogger($this->logger);
+        $resolver = new Field($context);
+
+        $this->assert(
+            'testDynamicKeyChainWithBrackets',
+            'found',
+            $resolver->resolve('field:arr[field:missing]|field:fallback'),
+            'Цепочка альтернатив работает вместе со скобками',
+            ['expression' => 'field:arr[field:missing]|field:fallback']
+        );
+    }
+
+    /**
+     * Тест: скобки внутри шаблонов {{ }} (полная форма и шорткат)
+     */
+    private function testDynamicKeyInsideTemplate(): void
+    {
+        $this->logger->separator('testDynamicKeyInsideTemplate');
+
+        $context = new Context([
+            'pr_hl' => ['A13' => 'Проигранная'],
+            'index_code' => 'A13',
+        ]);
+        $context->setTestLogger($this->logger);
+        $resolver = new Field($context);
+
+        $this->assert(
+            'testDynamicKeyInsideTemplate_Full',
+            'Проигранная',
+            $resolver->resolve('{{field:pr_hl[field:index_code]}}'),
+            'Полная форма field: со скобками работает в шаблоне',
+            ['expression' => '{{field:pr_hl[field:index_code]}}']
+        );
+
+        $this->assert(
+            'testDynamicKeyInsideTemplate_Shortcut',
+            'Статус: Проигранная',
+            $resolver->resolve('Статус: {{pr_hl[field:index_code]}}'),
+            'Шорткат со скобками работает в шаблоне',
+            ['expression' => 'Статус: {{pr_hl[field:index_code]}}']
         );
     }
     

@@ -86,13 +86,20 @@ class Field
     private const TEMPLATE_OPEN = '{{';
 
     /**
-     * Паттерн плейсхолдера. Внутри {{ }} допускаются:
-     * - field:... / result...           (полная форма)
-     * - голый путь LEAD.NAME            (шорткат, только без пробелов-слов)
+     * Внутренность плейсхолдера {{ }}:
+     * - field:... / result... — полная форма (скобки и | разрешены);
+     * - голый путь с опциональными [скобками] — шорткат (v1.7.0).
      * 
      * @var string
      */
-    private const TEMPLATE_PATTERN = '/\{\{\s*(field:[^}]+|result(?::[^}]+)?|[A-Za-z_А-Яа-я][A-Za-z0-9_А-Яа-я.]*)\s*\}\}/u';
+    private const TEMPLATE_INNER = 'field:[^}]+|result(?::[^}]+)?|[A-Za-z_А-Яа-я][A-Za-z0-9_А-Яа-я.]*(?:\[[^\]}]*\])*';
+
+    /**
+     * Паттерн плейсхолдера шаблона
+     * 
+     * @var string
+     */
+    private const TEMPLATE_PATTERN = '/\{\{\s*(' . self::TEMPLATE_INNER . ')\s*\}\}/u';
 
 
     /**
@@ -245,7 +252,7 @@ class Field
     private function resolveTemplate(string $expression)
     {
         // Вся строка — один плейсхолдер: сырое значение
-        if (preg_match('/^\{\{\s*(field:[^}]+|result(?::[^}]+)?|[A-Za-z_А-Яа-я][A-Za-z0-9_А-Яа-я.]*)\s*\}\}$/u', $expression, $m)) {
+        if (preg_match('/^\{\{\s*(' . self::TEMPLATE_INNER . ')\s*\}\}$/u', $expression, $m)) {
             return $this->resolve($this->normalizeInner($m[1]));
         }
 
@@ -293,7 +300,7 @@ class Field
      */
     private function resolveAlternatives(string $expression)
     {
-        $parts = explode(self::ALTERNATIVE_SEPARATOR, $expression);
+        $parts = $this->splitTopLevel($expression, self::ALTERNATIVE_SEPARATOR);
 
         $this->context->log('INFO', 'Field', 'Разрешение цепочки альтернатив', [
             'expression' => $expression,
@@ -339,6 +346,11 @@ class Field
         $path = substr($expression, strlen(self::PREFIX_FIELD));
 
         $this->context->log('INFO', 'Field', "Разрешение поля: {$path}");
+
+        // v1.7.0 dynamic-key-access: путь со скобками — новый walker
+        if (strpos($path, '[') !== false) {
+            return $this->resolveFieldPath($path);
+        }
 
         if (!$this->context->has($path)) {
             $this->context->log('INFO', 'Field', "Поле не найдено: {$path}", [
@@ -441,6 +453,227 @@ class Field
         $this->context->log('SUCCESS', 'Field', "Метод распарсен", $result);
 
         return $result;
+    }
+
+    /**
+     * Разрешает путь поля с динамическими ключами (v1.7.0).
+     * 
+     * Примеры: pr_hl[field:index_code], a.b[field:k].name, m[field:r][field:c]
+     * Отсутствующий ключ → null (семантика всего DSL).
+     * 
+     * @param string $path Путь после префикса field:
+     * @return mixed Значение или null
+     */
+    private function resolveFieldPath(string $path)
+    {
+        $segments = $this->parsePathSegments($path);
+
+        $current = null;
+        $started = false;
+
+        foreach ($segments as $segment) {
+            if ($segment['type'] === 'key') {
+                $key = $segment['value'];
+            } else {
+                $key = $this->resolveBracketKey($segment['value']);
+
+                if ($key === null) {
+                    $this->context->log('INFO', 'Field', "Динамический ключ разрешился в null: {$path}");
+                    return null;
+                }
+            }
+
+            if (!$started) {
+                $current = $this->context->get((string) $key);
+                $started = true;
+            } else {
+                $current = is_array($current) ? ($current[$key] ?? null) : null;
+            }
+
+            if ($current === null) {
+                $this->context->log('INFO', 'Field', "Ключ не найден в пути: {$path}", ['key' => $key]);
+                return null;
+            }
+        }
+
+        $this->context->log('SUCCESS', 'Field', "Путь с динамическими ключами разрешён: {$path}", [
+            'value' => $current
+        ]);
+
+        return $current;
+    }
+
+    /**
+     * Разбирает путь на сегменты: литеральные ключи и [выражения].
+     * Учитывает вложенность скобок и кавычки.
+     * 
+     * @param string $path Путь после field:
+     * @return array Сегменты ['type' => 'key'|'expr', 'value' => string]
+     * @throws \RuntimeException При непарной скобке
+     */
+    private function parsePathSegments(string $path): array
+    {
+        $segments = [];
+        $name = '';
+        $len = strlen($path);
+        $i = 0;
+
+        $flush = function () use (&$name, &$segments): void {
+            if ($name !== '') {
+                $segments[] = ['type' => 'key', 'value' => $name];
+                $name = '';
+            }
+        };
+
+        while ($i < $len) {
+            $ch = $path[$i];
+
+            if ($ch === '.') {
+                $flush();
+                $i++;
+                continue;
+            }
+
+            if ($ch !== '[') {
+                $name .= $ch;
+                $i++;
+                continue;
+            }
+
+            // Скобка: ищем парную с учётом вложенности и кавычек
+            $flush();
+            $depth = 1;
+            $inQuote = null;
+            $j = $i + 1;
+
+            while ($j < $len && $depth > 0) {
+                $c = $path[$j];
+
+                if ($inQuote !== null) {
+                    if ($c === $inQuote) {
+                        $inQuote = null;
+                    }
+                } elseif ($c === '\'' || $c === '"') {
+                    $inQuote = $c;
+                } elseif ($c === '[') {
+                    $depth++;
+                } elseif ($c === ']') {
+                    $depth--;
+                }
+
+                $j++;
+            }
+
+            if ($depth !== 0) {
+                throw new \RuntimeException("Непарная скобка в выражении field:{$path}");
+            }
+
+            $segments[] = [
+                'type'  => 'expr',
+                'value' => substr($path, $i + 1, $j - $i - 2),
+            ];
+            $i = $j;
+        }
+
+        $flush();
+
+        return $segments;
+    }
+
+    /**
+     * Разрешает содержимое [...] (v1.7.0):
+     * - 'str' / "str" — литерал в кавычках;
+     * - число — числовой индекс;
+     * - field:/result:... — выражение (рекурсивно, включая цепочки |);
+     * - голое имя — литеральный ключ.
+     * 
+     * @param string $inner Содержимое скобок
+     * @return mixed Ключ или null
+     */
+    private function resolveBracketKey(string $inner)
+    {
+        $inner = trim($inner);
+
+        // Литерал в кавычках
+        if (
+            strlen($inner) >= 2
+            && ($inner[0] === '\'' || $inner[0] === '"')
+            && substr($inner, -1) === $inner[0]
+        ) {
+            return substr($inner, 1, -1);
+        }
+
+        // Числовой индекс
+        if (is_numeric($inner)) {
+            return (strpos($inner, '.') === false) ? (int) $inner : $inner;
+        }
+
+        // Выражение (field:, result:, цепочки)
+        if ($this->startsWithKnownPrefix($inner)) {
+            return $this->resolve($inner);
+        }
+
+        // Голое имя — литеральный ключ
+        return $inner;
+    }
+
+    /**
+     * Разбивает строку по разделителю ТОЛЬКО на верхнем уровне:
+     * разделители внутри [...] и внутри кавычек не учитываются (v1.7.0).
+     * 
+     * @param string $expression Строка
+     * @param string $separator Разделитель
+     * @return array Части
+     */
+    private function splitTopLevel(string $expression, string $separator = '|'): array
+    {
+        $parts = [];
+        $current = '';
+        $depth = 0;
+        $inQuote = null;
+        $len = strlen($expression);
+
+        for ($i = 0; $i < $len; $i++) {
+            $ch = $expression[$i];
+
+            if ($inQuote !== null) {
+                if ($ch === $inQuote) {
+                    $inQuote = null;
+                }
+                $current .= $ch;
+                continue;
+            }
+
+            if ($ch === '\'' || $ch === '"') {
+                $inQuote = $ch;
+                $current .= $ch;
+                continue;
+            }
+
+            if ($ch === '[') {
+                $depth++;
+                $current .= $ch;
+                continue;
+            }
+
+            if ($ch === ']') {
+                $depth--;
+                $current .= $ch;
+                continue;
+            }
+
+            if ($depth === 0 && $ch === $separator) {
+                $parts[] = $current;
+                $current = '';
+                continue;
+            }
+
+            $current .= $ch;
+        }
+
+        $parts[] = $current;
+
+        return $parts;
     }
 
     /**
