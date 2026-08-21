@@ -24,7 +24,7 @@ use Api\Services\Actions\Interpreter;
  * 
  * Лог: Interpreter_YYYY-MM-DD_HH-II-SS.log
  * 
- * Всего тестов: 48
+ * Всего тестов: 53
  * 
  * @package Api\Services\Actions\Testing
  */
@@ -123,6 +123,13 @@ class InterpreterTest
         $this->testSwitchNoMatchChainContinues();
         $this->testSwitchConsumesChain();
         $this->testSwitchLooseComparison();
+
+        // независимые if и вложенность (v1.10.0)
+        $this->testIndependentIfsBothRun();
+        $this->testIndependentDoesNotBreakChain();
+        $this->testNestedExecuteInActions();
+        $this->testSwitchCaseNestedIfElse();
+        $this->testDeepNesting();
 
         $this->logger->summary($this->passed, $this->failed);
 
@@ -1521,6 +1528,253 @@ class InterpreterTest
             $responseHandler->response,
             'Switch сравнивает слабо: int 1 совпадает с case "1"',
             ['value' => 1, 'case' => "'1'"]
+        );
+    }
+
+    // ========================================================
+    // НЕЗАВИСИМЫЕ IF И ВЛОЖЕННОСТЬ (v1.10.0)
+    // ========================================================
+
+    /**
+     * Тест: два независимых if — оба срабатывают
+     * 
+     * @return void
+     */
+    private function testIndependentIfsBothRun(): void
+    {
+        $this->logger->separator('testIndependentIfsBothRun');
+
+        $interpreter = new Interpreter([
+            'ind_action' => [
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'if',
+                        'independent' => true,
+                        'filter' => ['field:a' => 1],
+                        'actions' => [['response' => ['hit' => 'first']]],
+                    ],
+                    [
+                        'check' => 'if',
+                        'independent' => true,
+                        'filter' => ['field:b' => 1],
+                        'actions' => [['response' => ['hit' => 'second']]],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $responseHandler = $interpreter->run('ind_action', 'test', ['a' => 1, 'b' => 1]);
+
+        $this->assert(
+            'testIndependentIfsBothRun',
+            [['hit' => 'first'], ['hit' => 'second']],
+            $responseHandler->response,
+            'Оба независимых if должны сработать',
+            ['independent' => true]
+        );
+    }
+
+    /**
+     * Тест: независимый if не разрывает цепочку if/else
+     * 
+     * @return void
+     */
+    private function testIndependentDoesNotBreakChain(): void
+    {
+        $this->logger->separator('testIndependentDoesNotBreakChain');
+
+        $interpreter = new Interpreter([
+            'ind_action' => [
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'if',
+                        'independent' => true,
+                        'filter' => ['field:a' => 1],
+                        'actions' => [['response' => ['hit' => 'ind']]],
+                    ],
+                    [
+                        'check' => 'if',
+                        'filter' => ['field:x' => 1],
+                        'actions' => [['response' => ['hit' => 'chain_if']]],
+                    ],
+                    [
+                        'check' => 'else',
+                        'actions' => [['response' => ['hit' => 'chain_else']]],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $responseHandler = $interpreter->run('ind_action', 'test', ['a' => 1, 'x' => 0]);
+
+        $this->assert(
+            'testIndependentDoesNotBreakChain',
+            [['hit' => 'ind'], ['hit' => 'chain_else']],
+            $responseHandler->response,
+            'Независимый if сработал, цепочка if/else продолжилась до else',
+            ['chain' => 'independent → if(false) → else']
+        );
+    }
+
+    /**
+     * Тест: вложенный execute внутри actions
+     * 
+     * @return void
+     */
+    private function testNestedExecuteInActions(): void
+    {
+        $this->logger->separator('testNestedExecuteInActions');
+
+        $interpreter = new Interpreter([
+            'nested_action' => [
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'if',
+                        'filter' => ['field:a' => 1],
+                        'actions' => [
+                            ['response' => ['level' => 1]],
+                            [
+                                'execute' => [
+                                    [
+                                        'check' => 'if',
+                                        'filter' => ['field:b' => 1],
+                                        'actions' => [['response' => ['level' => 2]]],
+                                    ],
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $responseHandler = $interpreter->run('nested_action', 'test', ['a' => 1, 'b' => 1]);
+
+        $this->assert(
+            'testNestedExecuteInActions',
+            [['level' => 1], ['level' => 2]],
+            $responseHandler->response,
+            'Вложенный execute выполняется внутри actions',
+            ['depth' => 2]
+        );
+    }
+
+    /**
+     * Тест: switch → case → вложенный if/elseif/else
+     * 
+     * @return void
+     */
+    private function testSwitchCaseNestedIfElse(): void
+    {
+        $this->logger->separator('testSwitchCaseNestedIfElse');
+
+        $interpreter = new Interpreter([
+            'switch_nested' => [
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'switch',
+                        'expression' => 'field:client_type',
+                        'cases' => [
+                            'contact' => [
+                                'actions' => [
+                                    [
+                                        'execute' => [
+                                            [
+                                                'check' => 'if',
+                                                'filter' => ['field:vip' => 1],
+                                                'actions' => [['response' => ['branch' => 'vip_contact']]],
+                                            ],
+                                            [
+                                                'check' => 'else',
+                                                'actions' => [['response' => ['branch' => 'regular_contact']]],
+                                            ],
+                                        ],
+                                    ],
+                                ],
+                            ],
+                            'default' => [
+                                'actions' => [['response' => ['branch' => 'default']]],
+                            ],
+                        ],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $responseHandler = $interpreter->run('switch_nested', 'test', ['client_type' => 'contact', 'vip' => 0]);
+
+        $this->assert(
+            'testSwitchCaseNestedIfElse',
+            [['branch' => 'regular_contact']],
+            $responseHandler->response,
+            'switch → case → вложенный if/else: сработала ветка else',
+            ['path' => 'switch(contact) → if(vip=0) → else']
+        );
+    }
+
+    /**
+     * Тест: три уровня вложенности (switch → if → if)
+     * 
+     * @return void
+     */
+    private function testDeepNesting(): void
+    {
+        $this->logger->separator('testDeepNesting');
+
+        $interpreter = new Interpreter([
+            'deep_action' => [
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'switch',
+                        'expression' => 'field:l1',
+                        'cases' => [
+                            'a' => [
+                                'actions' => [
+                                    [
+                                        'execute' => [
+                                            [
+                                                'check' => 'if',
+                                                'filter' => ['field:l2' => 1],
+                                                'actions' => [
+                                                    [
+                                                        'execute' => [
+                                                            [
+                                                                'check' => 'if',
+                                                                'filter' => ['field:l3' => 1],
+                                                                'actions' => [['response' => ['deep' => true]]],
+                                                            ],
+                                                        ],
+                                                    ],
+                                                ],
+                                            ],
+                                        ],
+                                    ],
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $responseHandler = $interpreter->run('deep_action', 'test', ['l1' => 'a', 'l2' => 1, 'l3' => 1]);
+
+        $this->assert(
+            'testDeepNesting',
+            [['deep' => true]],
+            $responseHandler->response,
+            'Три уровня вложенности проходят до конца',
+            ['depth' => 3]
         );
     }
     

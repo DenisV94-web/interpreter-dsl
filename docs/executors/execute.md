@@ -237,6 +237,61 @@
 
 ---
 
+## Независимые условия и вложенность (v1.10.0)
+
+### independent — if вне цепочки
+
+Блок с `'independent' => true` проверяется **всегда**, независимо от
+цепочки if/elseif/else/switch, и сам её не прерывает:
+
+```php
+'execute' => [
+    ['check' => 'if', 'independent' => true,
+     'filter' => ['field:need_log' => 1], 'actions' => [...]],
+    ['check' => 'if', 'independent' => true,
+     'filter' => ['field:need_notify' => 1], 'actions' => [...]],
+    // цепочка ниже работает как раньше
+    ['check' => 'if', 'filter' => [...], 'actions' => [...]],
+    ['check' => 'else', 'actions' => [...]],
+],
+```
+
+- несколько независимых if подряд — срабатывают **все** истинные;
+- независимый блок срабатывает, даже если цепочка уже выполнена;
+- `'check' => 'switch'` с `independent` тоже работает;
+- `'else'` с `independent` — не поддерживается (warning, блок пропущен).
+
+### Вложенность execute
+
+Action может содержать ключ `'execute' => [...]` — вложенный блок
+ветвлений. Глубина не ограничена:
+
+```php
+'actions' => [
+    ['response' => ['level' => 1]],
+    [
+        'execute' => [                          // уровень 2
+            ['check' => 'switch', 'expression' => 'field:type', 'cases' => [
+                'contact' => ['actions' => [
+                    ['execute' => [             // уровень 3
+                        ['check' => 'if', 'filter' => ['field:vip' => 1],
+                         'actions' => [...]],
+                        ['check' => 'else', 'actions' => [...]],
+                    ]],
+                ]],
+            ]],
+        ],
+    ],
+],
+```
+
+- вложенный execute работает везде, где разрешены actions:
+  в if/elseif/else, в switch-case, в другом вложенном execute;
+- `conditions` на action с `execute` учитываются;
+- ошибка внутри вложенного блока прерывает весь `execute`.
+
+---
+
 ## Куда дальше
 
 - [compose](compose.md) — финальная сборка

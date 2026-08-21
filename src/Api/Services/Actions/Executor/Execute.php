@@ -141,6 +141,27 @@ class Execute
                 'block' => $block
             ]);
 
+            // v1.10.0: независимый блок — проверяется ВСЕГДА,
+            // независимо от цепочки if/elseif/else/switch, и не прерывает её
+            if (($block['independent'] ?? false) === true) {
+                $this->context->log('INFO', 'Execute', "Независимый блок #{$index} (check: {$check})");
+
+                if ($check === 'else') {
+                    $this->context->log('WARNING', 'Execute', "Блок #{$index}: 'else' с independent не поддерживается — пропущен");
+                } elseif ($check === 'switch') {
+                    $this->executeSwitchBlock($block, $index);
+                } elseif ($this->evaluateBlockCondition($block)) {
+                    $this->executeActions($block['actions'] ?? []);
+                }
+
+                if ($this->context->hasError()) {
+                    $this->context->log('ERROR', 'Execute', "Ошибка в независимом блоке #{$index}, прерывание execute");
+                    break;
+                }
+
+                continue;
+            }
+
             // Если предыдущий блок уже выполнен — пропускаем остальные (логика if/elseif/else)
             if ($executed) {
                 $this->context->log('INFO', 'Execute', "Блок #{$index} пропущен (предыдущий блок выполнен)");
@@ -418,6 +439,19 @@ class Execute
                     $this->context->log('INFO', 'Execute', "Action #{$actionIndex} пропущен (условие false)");
                     continue;
                 }
+            }
+
+            // v1.10.0: вложенный execute — рекурсивная обработка ветвлений.
+            // Глубина не ограничена: switch → case → if → execute → if → ...
+            if (isset($action['execute'])) {
+                $this->context->log('INFO', 'Execute', "Action #{$actionIndex}: вложенный execute");
+
+                $this->execute($action['execute']);
+
+                if ($this->context->hasError()) {
+                    break;
+                }
+                continue;
             }
 
             // ДОБАВЛЕНО: действие только с response (без method/skip/curl) —
