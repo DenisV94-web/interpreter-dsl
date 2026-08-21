@@ -36,6 +36,7 @@ class ArrayTransformerTest
         $this->testRenameKeys();
         $this->testToSelectOptionsWithTransform();
         $this->testToSelectOptionsChained();
+        $this->testApplyInstructions();
 
         $this->logger->summary($this->passed, $this->failed);
 
@@ -258,6 +259,59 @@ class ArrayTransformerTest
             'HELLO',
             $result[0]['clean'] ?? null,
             'Вложенные fn-правила работают рекурсивно',
+            []
+        );
+    }
+
+    /**
+     * applyInstructions: инкремент, литерал, field:, null-инструкции
+     */
+    private function testApplyInstructions(): void
+    {
+        $this->logger->separator('testApplyInstructions');
+
+        $t = new ArrayTransformer();
+
+        $result = $t->applyInstructions(
+            [
+                'UF_CALL_COUNT' => 'UF_CALL_COUNT++',
+                'UF_DO_NOT_CONTACT' => '1',
+                'UF_CALL_DATE' => 'field:next_action_at',
+                'UF_MISSING_REF' => 'field:unknown',
+            ],
+            ['UF_CALL_COUNT' => '4'],
+            ['next_action_at' => '2026-08-28 10:00:00']
+        );
+
+        $this->assert(
+            'testApplyInstructions_Increment',
+            5,
+            $result['UF_CALL_COUNT'] ?? null,
+            'UF_CALL_COUNT++ от текущего значения 4 даёт 5',
+            []
+        );
+
+        $this->assert(
+            'testApplyInstructions_Literal',
+            '1',
+            $result['UF_DO_NOT_CONTACT'] ?? null,
+            'Литерал передаётся как есть',
+            []
+        );
+
+        $this->assert(
+            'testApplyInstructions_Field',
+            '2026-08-28 10:00:00',
+            $result['UF_CALL_DATE'] ?? null,
+            'field:next_action_at берётся из values',
+            []
+        );
+
+        $this->assert(
+            'testApplyInstructions_NullInstructions',
+            [],
+            $t->applyInstructions(null, []),
+            'null-инструкции (пустой JSON) дают пустой массив',
             []
         );
     }

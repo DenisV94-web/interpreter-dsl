@@ -107,6 +107,50 @@ class ArrayTransformer
     }
 
     /**
+     * Применяет инструкции изменения полей лида (v1.14.0).
+     * 
+     * Типы инструкций (значения декодированного UF_JSON_MAPPING_FIELDS):
+     * - 'FIELD++'  — инкремент: (int) current[FIELD] + 1;
+     * - 'field:x'  — значение из массива values (значения контекста);
+     * - литерал    — как есть ('1', 'строка').
+     * 
+     * @param array|null $instructions Декодированный маппинг {поле => инструкция}
+     * @param array $current Текущие значения лида (для ++)
+     * @param array $values Значения для инструкций field:*
+     * @return array Массив для обновления
+     */
+    public function applyInstructions(?array $instructions, array $current, array $values = []): array
+    {
+        $update = [];
+
+        foreach ((array) $instructions as $field => $instruction) {
+            if (!is_string($instruction)) {
+                $update[$field] = $instruction;
+                continue;
+            }
+
+            // Инкремент: "UF_CALL_COUNT++"
+            if (substr($instruction, -2) === '++') {
+                $base = substr($instruction, 0, -2);
+                $update[$field] = ((int) ($current[$base] ?? 0)) + 1;
+                continue;
+            }
+
+            // Значение из контекста: "field:next_action_at"
+            if (strpos($instruction, 'field:') === 0) {
+                $key = substr($instruction, strlen('field:'));
+                $update[$field] = $values[$key] ?? null;
+                continue;
+            }
+
+            // Литерал
+            $update[$field] = $instruction;
+        }
+
+        return $update;
+    }
+
+    /**
      * Переименовывает ключи у каждого объекта в списке.
      * Удобно, когда нужно просто алиасы: ['old' => 'new'].
      * 

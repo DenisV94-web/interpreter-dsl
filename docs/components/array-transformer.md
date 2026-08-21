@@ -103,6 +103,36 @@ Field Resolver'ом и доходит до сервиса как литерал,
 
 ---
 
+## applyInstructions — инструкции изменения полей (v1.14.0)
+
+Применяет инструкции из декодированного JSON-маппинга
+(например, `UF_JSON_MAPPING_FIELDS` HL-блока) к текущим значениям:
+
+```php
+'lead_update' => [
+    'method' => 'applyInstructions',
+    'class'  => \Api\Services\ArrayTransformer::class,
+    'params' => [
+        'field:decoded_mapping',   // json_decode(UF_JSON_MAPPING_FIELDS, true)
+        'field:params.lead',       // текущие значения лида
+        'field:mapping_values',    // значения для инструкций field:*
+    ],
+],
+```
+
+| Инструкция         | Пример                                   | Результат                  |
+| ------------------ | ---------------------------------------- | -------------------------- |
+| инкремент          | `"UF_CALL_COUNT": "UF_CALL_COUNT++"`     | `(int) current + 1`        |
+| значение контекста | `"UF_CALL_DATE": "field:next_action_at"` | `values['next_action_at']` |
+| литерал            | `"UF_DO_NOT_CONTACT": "1"`               | `'1'`                      |
+
+- инструкции — это **данные**, а не DSL-выражения: конфликтов с `field:` нет;
+- `null`-инструкции (пустой JSON) → пустой массив;
+- дальше payload дособирается через `array_merge` (например, с условными
+  полями подразделения из `dep_fields`) и уходит в `execute` на update.
+
+---
+
 ## Где живёт
 
 - класс: `src/Api/Services/ArrayTransformer.php` (`namespace Api\Services`);
