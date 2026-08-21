@@ -24,7 +24,7 @@ use Api\Services\Actions\Interpreter;
  * 
  * Лог: Interpreter_YYYY-MM-DD_HH-II-SS.log
  * 
- * Всего тестов: 53
+ * Всего тестов: 55
  * 
  * @package Api\Services\Actions\Testing
  */
@@ -130,6 +130,10 @@ class InterpreterTest
         $this->testNestedExecuteInActions();
         $this->testSwitchCaseNestedIfElse();
         $this->testDeepNesting();
+
+        // set (v1.12.0)
+        $this->testSetActionWritesContext();
+        $this->testSetActionConditional();
 
         $this->logger->summary($this->passed, $this->failed);
 
@@ -1775,6 +1779,94 @@ class InterpreterTest
             $responseHandler->response,
             'Три уровня вложенности проходят до конца',
             ['depth' => 3]
+        );
+    }
+
+        // ========================================================
+    // SET (v1.12.0)
+    // ========================================================
+
+    /**
+     * Тест: set пишет в контекст, значение видно в следующих блоках
+     * 
+     * @return void
+     */
+    private function testSetActionWritesContext(): void
+    {
+        $this->logger->separator('testSetActionWritesContext');
+
+        $interpreter = new Interpreter([
+            'set_action' => [
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'if',
+                        'filter' => [],
+                        'actions' => [
+                            // 1. Сначала пишем в контекст
+                            ['set' => ['final_id' => 'field:a.ID|field:b.ID']],
+                            // 2. Затем используем — с условиями
+                            [
+                                'conditions' => ['!field:final_id' => 'func:empty'],
+                                'response'   => ['final' => 'field:final_id'],
+                            ],
+                        ],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $responseHandler = $interpreter->run('set_action', 'test', [
+            'a' => [],
+            'b' => ['ID' => 77],
+        ]);
+
+        $this->assert(
+            'testSetActionWritesContext_Value',
+            77,
+            $responseHandler->response[0]['final'] ?? null,
+            'set записал в контекст, следующее действие его прочитало и записало в response',
+            ['set' => 'field:a.ID|field:b.ID']
+        );
+    }
+
+    /**
+     * Тест: set с ложным conditions НЕ пишет в контекст
+     * 
+     * @return void
+     */
+    private function testSetActionConditional(): void
+    {
+        $this->logger->separator('testSetActionConditional');
+
+        $interpreter = new Interpreter([
+            'set_cond' => [
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'if',
+                        'filter' => [],
+                        'actions' => [
+                            [
+                                'conditions' => ['field:flag' => 1],
+                                'set' => ['x' => 1],
+                            ],
+                        ],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $interpreter->run('set_cond', 'test', ['flag' => 0]);
+
+        $this->assert(
+            'testSetActionConditional',
+            null,
+            $interpreter->getContext()->get('x'),
+            'set с ложным conditions не пишет в контекст',
+            ['flag' => 0]
         );
     }
     

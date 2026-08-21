@@ -441,6 +441,22 @@ class Execute
                 }
             }
 
+            // v1.12.0: set — запись/перезапись значений в контекст из execute.
+            // Позволяет дополнять и перезаписывать данные request на этапе решений.
+            if (isset($action['set']) && !empty($action['set'])) {
+                foreach ($action['set'] as $key => $expression) {
+                    $value = is_array($expression)
+                        ? $this->fieldResolver->resolveParams($expression)
+                        : $this->fieldResolver->resolve($expression);
+
+                    $this->context->set($key, $value);
+
+                    $this->context->log('SUCCESS', 'Execute', "set: контекст обновлён: {$key}", [
+                        'value' => $value,
+                    ]);
+                }
+            }
+
             // v1.10.0: вложенный execute — рекурсивная обработка ветвлений.
             // Глубина не ограничена: switch → case → if → execute → if → ...
             if (isset($action['execute'])) {
@@ -457,7 +473,7 @@ class Execute
             // ДОБАВЛЕНО: действие только с response (без method/skip/curl) —
             // формирует запись в response без вызова метода.
             // Кейс: ошибка валидации с task_id, когда лид создавать нельзя.
-            if (!isset($action['method']) && !isset($action['curl']) && !isset($action['skip'])) {
+            if (!isset($action['method']) && !isset($action['curl']) && !isset($action['skip']) && !isset($action['set'])) {
                 if (isset($action['response']) && !empty($action['response'])) {
                     $this->processResponse($action['response'], null);
 
