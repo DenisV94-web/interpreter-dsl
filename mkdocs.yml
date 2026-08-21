@@ -142,6 +142,7 @@ nav:
       - Контекст и params: components/context.md
       - Логирование: components/logging.md
       - ArrayFilter: components/array-filter.md
+      - ArrayTransformer: components/array-transformer.md
 
   - Примеры:
       - demo_lead и demo_card: examples/demo.md
