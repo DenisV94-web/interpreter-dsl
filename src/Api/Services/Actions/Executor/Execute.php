@@ -137,6 +137,13 @@ class Execute
         foreach ($config as $index => $block) {
             $check = $block['check'] ?? 'if';
 
+            // v1.13.0: 'if' и 'switch' начинают НОВУЮ цепочку ветвления,
+            // 'elseif'/'else' продолжают текущую. Поэтому несколько
+            // if/switch подряд выполняются по очереди, как отдельные операторы.
+            if ($check === 'if' || $check === 'switch') {
+                $executed = false;
+            }
+
             $this->context->log('INFO', 'Execute', "Обработка блока #{$index} (check: {$check})", [
                 'block' => $block
             ]);

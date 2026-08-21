@@ -24,7 +24,7 @@ use Api\Services\Actions\Interpreter;
  * 
  * Лог: Interpreter_YYYY-MM-DD_HH-II-SS.log
  * 
- * Всего тестов: 55
+ * Всего тестов: 59
  * 
  * @package Api\Services\Actions\Testing
  */
@@ -134,6 +134,12 @@ class InterpreterTest
         // set (v1.12.0)
         $this->testSetActionWritesContext();
         $this->testSetActionConditional();
+
+        // семантика цепочек (v1.13.0)
+        $this->testSequentialIfsRunInOrder();
+        $this->testChainIfElseifElse();
+        $this->testSwitchAfterIfExecutes();
+        $this->testElseBindsToSwitch();
 
         $this->logger->summary($this->passed, $this->failed);
 
@@ -1867,6 +1873,179 @@ class InterpreterTest
             $interpreter->getContext()->get('x'),
             'set с ложным conditions не пишет в контекст',
             ['flag' => 0]
+        );
+    }
+
+    // ========================================================
+    // СЕМАНТИКА ЦЕПОЧЕК (v1.13.0)
+    // ========================================================
+
+    /**
+     * Тест: два if подряд — оба выполняются по очереди
+     * 
+     * @return void
+     */
+    private function testSequentialIfsRunInOrder(): void
+    {
+        $this->logger->separator('testSequentialIfsRunInOrder');
+
+        $interpreter = new Interpreter([
+            'seq_ifs' => [
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'if',
+                        'filter' => ['field:a' => 1],
+                        'actions' => [['response' => ['hit' => 'first_if']]],
+                    ],
+                    [
+                        'check' => 'if',
+                        'filter' => ['field:b' => 1],
+                        'actions' => [['response' => ['hit' => 'second_if']]],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $responseHandler = $interpreter->run('seq_ifs', 'test', ['a' => 1, 'b' => 1]);
+
+        $this->assert(
+            'testSequentialIfsRunInOrder',
+            [['hit' => 'first_if'], ['hit' => 'second_if']],
+            $responseHandler->response,
+            'Два if подряд выполняются по очереди (v1.13.0)',
+            ['blocks' => 'if → if']
+        );
+    }
+
+    /**
+     * Тест: if → elseif → else — внутри цепочки срабатывает один блок
+     * 
+     * @return void
+     */
+    private function testChainIfElseifElse(): void
+    {
+        $this->logger->separator('testChainIfElseifElse');
+
+        $interpreter = new Interpreter([
+            'chain' => [
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'if',
+                        'filter' => ['field:a' => 1],
+                        'actions' => [['response' => ['hit' => 'if']]],
+                    ],
+                    [
+                        'check' => 'elseif',
+                        'filter' => ['field:a' => 1],
+                        'actions' => [['response' => ['hit' => 'elseif']]],
+                    ],
+                    [
+                        'check' => 'else',
+                        'actions' => [['response' => ['hit' => 'else']]],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $responseHandler = $interpreter->run('chain', 'test', ['a' => 1]);
+
+        $this->assert(
+            'testChainIfElseifElse',
+            [['hit' => 'if']],
+            $responseHandler->response,
+            'В цепочке if/elseif/else срабатывает ровно один блок',
+            ['blocks' => 'if(true) → elseif(true) → else']
+        );
+    }
+
+    /**
+     * Тест: switch после if выполняется (не пропускается)
+     * 
+     * @return void
+     */
+    private function testSwitchAfterIfExecutes(): void
+    {
+        $this->logger->separator('testSwitchAfterIfExecutes');
+
+        $interpreter = new Interpreter([
+            'if_then_switch' => [
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'if',
+                        'filter' => ['field:a' => 1],
+                        'actions' => [['response' => ['hit' => 'if']]],
+                    ],
+                    [
+                        'check' => 'switch',
+                        'expression' => 'field:type',
+                        'cases' => [
+                            'x' => ['actions' => [['response' => ['hit' => 'switch']]]],
+                        ],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $responseHandler = $interpreter->run('if_then_switch', 'test', ['a' => 1, 'type' => 'x']);
+
+        $this->assert(
+            'testSwitchAfterIfExecutes',
+            [['hit' => 'if'], ['hit' => 'switch']],
+            $responseHandler->response,
+            'switch после сработавшего if выполняется как новый оператор',
+            ['blocks' => 'if(true) → switch(match)']
+        );
+    }
+
+    /**
+     * Тест: else привязывается к ближайшей цепочке (switch),
+     * а не к предыдущему if
+     * 
+     * @return void
+     */
+    private function testElseBindsToSwitch(): void
+    {
+        $this->logger->separator('testElseBindsToSwitch');
+
+        $interpreter = new Interpreter([
+            'else_bind' => [
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'if',
+                        'filter' => ['field:a' => 1],
+                        'actions' => [['response' => ['hit' => 'if']]],
+                    ],
+                    [
+                        'check' => 'switch',
+                        'expression' => 'field:type',
+                        'cases' => [
+                            'y' => ['actions' => [['response' => ['hit' => 'switch']]]],
+                        ],
+                    ],
+                    [
+                        'check' => 'else',
+                        'actions' => [['response' => ['hit' => 'else']]],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $responseHandler = $interpreter->run('else_bind', 'test', ['a' => 1, 'type' => 'x']);
+
+        $this->assert(
+            'testElseBindsToSwitch',
+            [['hit' => 'if'], ['hit' => 'else']],
+            $responseHandler->response,
+            'else относится к ближайшей цепочке: switch не совпал → else сработал',
+            ['blocks' => 'if(true) → switch(no match) → else']
         );
     }
     
