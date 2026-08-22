@@ -90,8 +90,19 @@ class Condition
      * @param array $filter Массив условий
      * @return bool Результат вычисления
      */
-    public function evaluate(array $filter): bool
+    public function evaluate($filter): bool
     {
+        // v1.15.0: conditions может быть строкой — field:-ссылкой на массив
+        // в контексте (динамические условия из данных, напр. UF_CONDITIONS)
+        if (is_string($filter)) {
+            $filter = $this->fieldResolver->resolve($filter);
+        }
+
+        // null / не-массив (пустое поле, битый JSON) → условий нет → true
+        if (!is_array($filter)) {
+            $filter = [];
+        }
+
         $this->context->log('INFO', 'Condition', 'Начало вычисления условия', [
             'filter' => $filter
         ]);
@@ -195,38 +206,117 @@ class Condition
      */
     private function evaluateSingle(string $key, $value): bool
     {
-        // Проверяем отрицание
-        $negated = false;
-        $actualKey = $key;
-
-        if (str_starts_with($key, self::NEGATION_PREFIX)) {
-            $negated = true;
-            $actualKey = substr($key, strlen(self::NEGATION_PREFIX));
-        }
+        // v1.15.0: операторы Битрикс в ключе (<=, >=, !=, >, <, %, @, !@);
+        // '!' по-прежнему = отрицание всего сравнения (обратная совместимость)
+        [$operator, $actualKey] = $this->extractOperator($key);
 
         $this->context->log('INFO', 'Condition', "Вычисление одиночного условия", [
             'key' => $key,
             'actual_key' => $actualKey,
-            'negated' => $negated,
+            'operator' => $operator,
             'value' => $value
         ]);
 
         // Разрешаем ключ (field:...)
         $fieldValue = $this->fieldResolver->resolve($actualKey);
 
-        // Вычисляем условие
-        $result = $this->compareValues($fieldValue, $value);
+        // v1.15.0: правая часть резолвится (field:, {{ }}; литералы не меняются)
+        $expected = $this->resolveExpected($value);
 
-        // Применяем отрицание
-        if ($negated) {
-            $result = !$result;
-            $this->context->log('INFO', 'Condition', "Применено отрицание", [
-                'before' => !$result,
-                'after' => $result
-            ]);
+        return $this->compareWithOperator($fieldValue, $operator, $expected);
+    }
+
+    /**
+     * Извлекает оператор из ключа условия (v1.15.0).
+     * 
+     * Порядок важен: сначала двухсимвольные. '!' отдельно — это
+     * отрицание всего сравнения (legacy), а не оператор «не равно».
+     * 
+     * @param string $key Ключ условия
+     * @return array [operator, actualKey]
+     */
+    private function extractOperator(string $key): array
+    {
+        $operators = ['!@', '!=', '<=', '>=', '>', '<', '%', '@', '='];
+
+        foreach ($operators as $op) {
+            if (str_starts_with($key, $op)) {
+                return [$op, substr($key, strlen($op))];
+            }
         }
 
-        return $result;
+        // '!' — отрицание всего сравнения (как было до 1.15.0)
+        if (str_starts_with($key, self::NEGATION_PREFIX)) {
+            return ['!', substr($key, strlen(self::NEGATION_PREFIX))];
+        }
+
+        return ['=', $key];
+    }
+
+    /**
+     * Разрешает правую часть условия (v1.15.0).
+     * func:/method: не трогаем — их обрабатывает compareValues.
+     * 
+     * @param mixed $value
+     * @return mixed
+     */
+    private function resolveExpected($value)
+    {
+        if (
+            is_string($value)
+            && !str_starts_with($value, 'func:')
+            && !str_starts_with($value, 'method:')
+        ) {
+            return $this->fieldResolver->resolve($value);
+        }
+
+        return $value;
+    }
+
+    /**
+     * Сравнивает с учётом оператора (v1.15.0).
+     * '=' и '!' делегируют в compareValues (func:/method:/==).
+     * 
+     * @param mixed $fieldValue
+     * @param string $operator
+     * @param mixed $expected
+     * @return bool
+     */
+    private function compareWithOperator($fieldValue, string $operator, $expected): bool
+    {
+        switch ($operator) {
+            case '!':
+                return !$this->compareValues($fieldValue, $expected);
+
+            case '!=':
+                return !$this->compareValues($fieldValue, $expected);
+
+            case '>':
+                return $fieldValue > $expected;
+
+            case '<':
+                return $fieldValue < $expected;
+
+            case '>=':
+                return $fieldValue >= $expected;
+
+            case '<=':
+                return $fieldValue <= $expected;
+
+            case '%':
+                return is_scalar($fieldValue)
+                    && is_scalar($expected)
+                    && stripos((string) $fieldValue, (string) $expected) !== false;
+
+            case '@':
+                return is_array($expected) && in_array($fieldValue, $expected, false);
+
+            case '!@':
+                return !(is_array($expected) && in_array($fieldValue, $expected, false));
+
+            default:
+                return $this->compareValues($fieldValue, $expected);
+        }
     }
 
     /**

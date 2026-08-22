@@ -24,7 +24,7 @@ use Api\Services\Actions\Interpreter;
  * 
  * Лог: Interpreter_YYYY-MM-DD_HH-II-SS.log
  * 
- * Всего тестов: 59
+ * Всего тестов: 62
  * 
  * @package Api\Services\Actions\Testing
  */
@@ -140,6 +140,12 @@ class InterpreterTest
         $this->testChainIfElseifElse();
         $this->testSwitchAfterIfExecutes();
         $this->testElseBindsToSwitch();
+
+        // строка в conditions (v1.15.0)
+        $this->testStringConditionsTrue();
+        $this->testStringConditionsFalse();
+        $this->testStringConditionsNull();
+
 
         $this->logger->summary($this->passed, $this->failed);
 
@@ -1788,7 +1794,7 @@ class InterpreterTest
         );
     }
 
-        // ========================================================
+    // ========================================================
     // SET (v1.12.0)
     // ========================================================
 
@@ -2046,6 +2052,141 @@ class InterpreterTest
             $responseHandler->response,
             'else относится к ближайшей цепочке: switch не совпал → else сработал',
             ['blocks' => 'if(true) → switch(no match) → else']
+        );
+    }
+
+    // ========================================================
+    // СТРОКА В CONDITIONS (v1.15.0)
+    // ========================================================
+
+    /**
+     * Тест: conditions-строка истинна → set записывает значение
+     * 
+     * @return void
+     */
+    private function testStringConditionsTrue(): void
+    {
+        $this->logger->separator('testStringConditionsTrue');
+
+        $interpreter = new Interpreter([
+            'str_cond' => [
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'if',
+                        'filter' => [],
+                        'actions' => [
+                            [
+                                'conditions' => 'field:cond',
+                                'set' => ['gate' => 'passed'],
+                            ],
+                        ],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $interpreter->run('str_cond', 'test', [
+            'max' => 3,
+            'count' => 5,
+            'cond' => ['<=field:max' => 'field:count'],
+        ]);
+
+        $context = $interpreter->getContext();
+
+        $this->assert(
+            'testStringConditionsTrue',
+            'passed',
+            $context ? $context->get('gate') : null,
+            'conditions-строка резолвится в массив и вычисляется (3 <= 5 → true)',
+            ['conditions' => 'field:cond']
+        );
+    }
+
+    /**
+     * Тест: conditions-строка ложна → set не выполняется
+     * 
+     * @return void
+     */
+    private function testStringConditionsFalse(): void
+    {
+        $this->logger->separator('testStringConditionsFalse');
+
+        $interpreter = new Interpreter([
+            'str_cond' => [
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'if',
+                        'filter' => [],
+                        'actions' => [
+                            [
+                                'conditions' => 'field:cond',
+                                'set' => ['gate' => 'passed'],
+                            ],
+                        ],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $interpreter->run('str_cond', 'test', [
+            'max' => 3,
+            'count' => 1,
+            'cond' => ['<=field:max' => 'field:count'],
+        ]);
+
+        $context = $interpreter->getContext();
+
+        $this->assert(
+            'testStringConditionsFalse',
+            null,
+            $context ? $context->get('gate') : 'NOT_NULL',
+            'Условие из данных ложно (3 <= 1 → false) → set не выполняется, gate = null',
+            ['conditions' => 'field:cond']
+        );
+    }
+
+    /**
+     * Тест: conditions-строка резолвится в null (поля нет) → true, set выполняется
+     * 
+     * @return void
+     */
+    private function testStringConditionsNull(): void
+    {
+        $this->logger->separator('testStringConditionsNull');
+
+        $interpreter = new Interpreter([
+            'str_cond' => [
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'if',
+                        'filter' => [],
+                        'actions' => [
+                            [
+                                'conditions' => 'field:missing',
+                                'set' => ['gate' => 'passed'],
+                            ],
+                        ],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $interpreter->run('str_cond', 'test', []);
+
+        $context = $interpreter->getContext();
+
+        $this->assert(
+            'testStringConditionsNull',
+            'passed',
+            $context ? $context->get('gate') : null,
+            'null вместо массива условий = условий нет = выполняем',
+            ['conditions' => 'field:missing']
         );
     }
     
