@@ -480,7 +480,9 @@ class Execute
             if (isset($action['execute'])) {
                 $this->context->log('INFO', 'Execute', "Action #{$actionIndex}: вложенный execute");
 
-                $this->execute($action['execute']);
+                // v1.16.0: пробрасываем merge_response во вложенный execute,
+                // иначе рекурсия сбрасывает флаг в false (дефолт сигнатуры)
+                $this->execute($action['execute'], $this->mergeResponse);
 
                 if ($this->context->hasError()) {
                     break;

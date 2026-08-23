@@ -24,7 +24,7 @@ use Api\Services\Actions\Interpreter;
  * 
  * Лог: Interpreter_YYYY-MM-DD_HH-II-SS.log
  * 
- * Всего тестов: 64
+ * Всего тестов: 65
  * 
  * @package Api\Services\Actions\Testing
  */
@@ -146,9 +146,10 @@ class InterpreterTest
         $this->testStringConditionsFalse();
         $this->testStringConditionsNull();
 
-        // Автоматический merge response в одиночном режиме (v1.16.0)
+        // Автоматический merge response в одиночном режиме (v1.16.0 - v1.16.1)
         $this->testMergeResponseInSingleMode();
         $this->testSeparateResponsePerIteration();
+        $this->testMergeResponseInNestedExecute();
 
 
         $this->logger->summary($this->passed, $this->failed);
@@ -2277,6 +2278,61 @@ class InterpreterTest
             $responseHandler->response,
             'В итерационном режиме каждая итерация = своя запись (response внутри итерации мержатся)',
             []
+        );
+    }
+
+    /**
+     * Тест: merge_response работает во вложенном execute
+     * 
+     * @return void
+     */
+    private function testMergeResponseInNestedExecute(): void
+    {
+        $this->logger->separator('testMergeResponseInNestedExecute');
+
+        $interpreter = new Interpreter([
+            'nested_merge' => [
+                'merge_response' => true,
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'if',
+                        'filter' => [],
+                        'actions' => [
+                            [
+                                'execute' => [
+                                    [
+                                        'check' => 'if',
+                                        'filter' => [],
+                                        'actions' => [['response' => ['a' => 1]]],
+                                    ],
+                                    [
+                                        'check' => 'if',
+                                        'filter' => [],
+                                        'actions' => [['response' => ['b' => 2]]],
+                                    ],
+                                    [
+                                        'check' => 'if',
+                                        'filter' => [],
+                                        'actions' => [['response' => ['c' => 3]]],
+                                    ],
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $responseHandler = $interpreter->run('nested_merge', 'test', []);
+
+        $this->assert(
+            'testMergeResponseInNestedExecute',
+            [['a' => 1, 'b' => 2, 'c' => 3]],
+            $responseHandler->response,
+            'merge_response=true должен работать и во вложенных execute',
+            ['depth' => 2, 'responses_merged' => 3]
         );
     }
     
