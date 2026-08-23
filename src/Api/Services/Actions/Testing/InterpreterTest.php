@@ -24,7 +24,7 @@ use Api\Services\Actions\Interpreter;
  * 
  * Лог: Interpreter_YYYY-MM-DD_HH-II-SS.log
  * 
- * Всего тестов: 62
+ * Всего тестов: 64
  * 
  * @package Api\Services\Actions\Testing
  */
@@ -145,6 +145,10 @@ class InterpreterTest
         $this->testStringConditionsTrue();
         $this->testStringConditionsFalse();
         $this->testStringConditionsNull();
+
+        // Автоматический merge response в одиночном режиме (v1.16.0)
+        $this->testMergeResponseInSingleMode();
+        $this->testSeparateResponsePerIteration();
 
 
         $this->logger->summary($this->passed, $this->failed);
@@ -2187,6 +2191,92 @@ class InterpreterTest
             $context ? $context->get('gate') : null,
             'null вместо массива условий = условий нет = выполняем',
             ['conditions' => 'field:missing']
+        );
+    }
+
+    /**
+     * Тест: одиночный режим — все response мержатся в одну запись
+     */
+    private function testMergeResponseInSingleMode(): void
+    {
+        $this->logger->separator('testMergeResponseInSingleMode');
+
+        $interpreter = new Interpreter([
+            'merge_test' => [
+                'merge_response' => true,
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'if',
+                        'filter' => [],
+                        'actions' => [['response' => ['a' => 1]]],
+                    ],
+                    [
+                        'check' => 'if',
+                        'filter' => [],
+                        'actions' => [['response' => ['b' => 2]]],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $responseHandler = $interpreter->run('merge_test', 'test', []);
+
+        $this->assert(
+            'testMergeResponseInSingleMode',
+            [['a' => 1, 'b' => 2]],
+            $responseHandler->response,
+            'В одиночном режиме все response мержатся в одну запись',
+            []
+        );
+    }
+
+    /**
+     * Тест: итерационный режим — каждая итерация = своя запись
+     */
+    private function testSeparateResponsePerIteration(): void
+    {
+        $this->logger->separator('testSeparateResponsePerIteration');
+
+        $interpreter = new Interpreter([
+            'iter_merge' => [
+                'merge_response' => true,
+                'request' => [
+                    'main' => 'post',
+                    'array' => 'items',
+                ],
+                'execute' => [
+                    [
+                        'check' => 'if',
+                        'filter' => [],
+                        'actions' => [
+                            ['response' => ['id' => 'field:id']],
+                            ['response' => ['name' => 'field:name']],
+                        ],
+                    ],
+                ],
+                'transaction' => ['enabled' => true, 'mode' => 'partial'],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $responseHandler = $interpreter->run('iter_merge', 'test', [
+            'items' => [
+                ['id' => 1, 'name' => 'first'],
+                ['id' => 2, 'name' => 'second'],
+            ],
+        ]);
+
+        $this->assert(
+            'testSeparateResponsePerIteration',
+            [
+                ['id' => 1, 'name' => 'first'],
+                ['id' => 2, 'name' => 'second'],
+            ],
+            $responseHandler->response,
+            'В итерационном режиме каждая итерация = своя запись (response внутри итерации мержатся)',
+            []
         );
     }
     

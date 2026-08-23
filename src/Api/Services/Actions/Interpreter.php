@@ -591,7 +591,8 @@ class Interpreter
 
             case 'execute':
                 if (isset($actionConfig['execute'])) {
-                    $this->executeExecutor->execute($actionConfig['execute']);
+                    $mergeResponse = (bool) ($actionConfig['merge_response'] ?? false);
+                    $this->executeExecutor->execute($actionConfig['execute'], $mergeResponse);
                 }
                 break;
 

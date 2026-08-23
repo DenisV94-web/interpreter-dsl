@@ -90,6 +90,13 @@ class Execute
     private array $transactionConfig;
 
     /**
+     * Флаг merge response (v1.16.0)
+     * 
+     * @var bool
+     */
+    private bool $mergeResponse;
+
+    /**
      * Execute constructor.
      * 
      * @param Context $context Контекст выполнения
@@ -103,7 +110,7 @@ class Execute
         Field $fieldResolver,
         Condition $conditionResolver,
         Method $methodResolver,
-        array $transactionConfig = []
+        array $transactionConfig = [],
     ) {
         $this->context = $context;
         $this->fieldResolver = $fieldResolver;
@@ -116,13 +123,17 @@ class Execute
      * Выполняет обработку блока execute
      * 
      * @param array $config Конфигурация блока execute (массив if/elseif/else блоков)
+     * @param bool $mergeResponse v1.16.0: объединять response в одну запись
      * @return array Собранный response
      */
-    public function execute(array $config): array
+    public function execute(array $config, bool $mergeResponse = false): array
     {
+        $this->mergeResponse = $mergeResponse;
+
         $this->context->log('INFO', 'Execute', '=== НАЧАЛО ОБРАБОТКИ EXECUTE ===', [
             'blocks_count' => count($config),
-            'iteration' => $this->context->iterationIndex
+            'iteration' => $this->context->iterationIndex,
+            'merge_response' => $this->mergeResponse,
         ]);
 
         // Проверяем что это массив блоков (не ассоциативный)
@@ -603,8 +614,16 @@ class Execute
             ]);
         }
 
-        // Добавляем в response контекста
-        $this->context->addResponse($responseData);
+        // v1.16.0: при merge_response объединяем записи
+        if ($this->mergeResponse) {
+            if ($this->context->iterationIndex === null) {
+                $this->context->mergeResponse($responseData);
+            } else {
+                $this->context->mergeIterationResponse($responseData);
+            }
+        } else {
+            $this->context->addResponse($responseData);
+        }
 
         $this->context->log('SUCCESS', 'Execute', 'response сформирован', [
             'response_data' => $responseData

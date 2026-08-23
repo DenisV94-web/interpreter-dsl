@@ -132,6 +132,14 @@ class Context
     private array $hiddenKeys = [];
 
     /**
+     * Индекс, с которого начинается запись текущей итерации в response.
+     * Используется для merge response внутри итерации (v1.16.0).
+     * 
+     * @var int
+     */
+    private int $iterationResponseStartIndex = 0;
+
+    /**
      * Context constructor.
      * 
      * @param array $rawRequest Исходные данные запроса
@@ -396,6 +404,9 @@ class Context
         $this->currentIterationData = $iterationData;
         $this->error = null;
 
+        // v1.16.0: запоминаем, с какого индекса начинаются записи этой итерации
+        $this->iterationResponseStartIndex = count($this->response);
+
         $this->log('INFO', 'Context', "Начало итерации #{$index}", $iterationData);
     }
 
@@ -437,6 +448,45 @@ class Context
         return in_array($key, $this->hiddenKeys, true);
     }
 
+    /**
+     * Объединяет данные с последней записью response (для одиночного режима).
+     * Если response пустой — создаёт первую запись.
+     * 
+     * @param array $data Данные для объединения
+     * @return void
+     */
+    public function mergeResponse(array $data): void
+    {
+        if (empty($this->response)) {
+            $this->response[] = $data;
+            return;
+        }
+
+        // Мержим в последнюю запись (в одиночном режиме она единственная)
+        $lastIndex = count($this->response) - 1;
+        $this->response[$lastIndex] = array_merge($this->response[$lastIndex], $data);
+    }
+
+    /**
+     * Объединяет данные с записью текущей итерации (для итерационного режима).
+     * Если для текущей итерации ещё нет записи — создаёт.
+     * Если есть — мержит в неё.
+     * 
+     * @param array $data Данные для объединения
+     * @return void
+     */
+    public function mergeIterationResponse(array $data): void
+    {
+        if (!isset($this->response[$this->iterationResponseStartIndex])) {
+            $this->response[$this->iterationResponseStartIndex] = $data;
+            return;
+        }
+
+        $this->response[$this->iterationResponseStartIndex] = array_merge(
+            $this->response[$this->iterationResponseStartIndex],
+            $data
+        );
+    }
     /**
      * Возвращает только вычисленные поля (extra, query, mapping)
      * 
