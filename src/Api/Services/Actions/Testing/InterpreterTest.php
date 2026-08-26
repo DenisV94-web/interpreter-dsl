@@ -24,7 +24,7 @@ use Api\Services\Actions\Interpreter;
  * 
  * Лог: Interpreter_YYYY-MM-DD_HH-II-SS.log
  * 
- * Всего тестов: 65
+ * Всего тестов: 69
  * 
  * @package Api\Services\Actions\Testing
  */
@@ -150,6 +150,10 @@ class InterpreterTest
         $this->testMergeResponseInSingleMode();
         $this->testSeparateResponsePerIteration();
         $this->testMergeResponseInNestedExecute();
+
+        // бизнес-ошибки в execute (v1.16.2)
+        $this->testExecuteActionError();
+        $this->testExecuteActionErrorWithConditions();
 
 
         $this->logger->summary($this->passed, $this->failed);
@@ -2333,6 +2337,115 @@ class InterpreterTest
             $responseHandler->response,
             'merge_response=true должен работать и во вложенных execute',
             ['depth' => 2, 'responses_merged' => 3]
+        );
+    }
+
+    /**
+     * Тест: 'error' в execute-action останавливает выполнение и возвращает ERROR
+     * 
+     * @return void
+     */
+    private function testExecuteActionError(): void
+    {
+        $this->logger->separator('testExecuteActionError');
+
+        $interpreter = new Interpreter([
+            'err_action' => [
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'if',
+                        'filter' => ['field:trigger' => 1],
+                        'actions' => [
+                            ['error' => 'Бизнес-ошибка: нельзя выполнить действие'],
+                        ],
+                    ],
+                    // Этот блок НЕ должен выполниться из-за error выше
+                    [
+                        'check' => 'if',
+                        'filter' => [],
+                        'actions' => [['response' => ['should_not_run' => true]]],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $responseHandler = $interpreter->run('err_action', 'test', ['trigger' => 1]);
+
+        $this->assert(
+            'testExecuteActionError_Status',
+            'ERROR',
+            $responseHandler->status,
+            'error в action → статус ERROR',
+            []
+        );
+
+        $logResponse = $interpreter->buildLogResponse();
+
+        $this->assert(
+            'testExecuteActionError_Message',
+            true,
+            str_contains(json_encode($logResponse, JSON_UNESCAPED_UNICODE), 'Бизнес-ошибка'),
+            'Текст бизнес-ошибки присутствует в buildLogResponse',
+            ['log_response' => $logResponse]
+        );
+
+        // Блок после error не выполнился
+        $hasUnexpectedResponse = false;
+        foreach ($responseHandler->response as $entry) {
+            if (isset($entry['should_not_run'])) {
+                $hasUnexpectedResponse = true;
+                break;
+            }
+        }
+
+        $this->assert(
+            'testExecuteActionError_NoNextBlocks',
+            false,
+            $hasUnexpectedResponse,
+            'Блоки после error не выполняются',
+            []
+        );
+    }
+
+    /**
+     * Тест: 'error' с conditions=false не срабатывает
+     * 
+     * @return void
+     */
+    private function testExecuteActionErrorWithConditions(): void
+    {
+        $this->logger->separator('testExecuteActionErrorWithConditions');
+
+        $interpreter = new Interpreter([
+            'err_cond' => [
+                'request' => ['main' => 'post'],
+                'execute' => [
+                    [
+                        'check' => 'if',
+                        'filter' => [],
+                        'actions' => [
+                            [
+                                'conditions' => ['field:trigger' => 0],
+                                'error' => 'Эта ошибка не должна сработать',
+                            ],
+                            ['response' => ['ok' => true]],
+                        ],
+                    ],
+                ],
+                'action_logic' => ['request', 'execute'],
+            ],
+        ]);
+
+        $responseHandler = $interpreter->run('err_cond', 'test', ['trigger' => 1]);
+
+        $this->assert(
+            'testExecuteActionErrorWithConditions_Status',
+            'SUCCESS',
+            $responseHandler->status,
+            'conditions=false → error не бросается, выполнение продолжается',
+            []
         );
     }
     

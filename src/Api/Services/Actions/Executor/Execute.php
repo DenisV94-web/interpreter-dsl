@@ -475,6 +475,27 @@ class Execute
                 }
             }
 
+            // v1.16.2: бизнес-ошибка — останавливает execute с пользовательским текстом.
+            // Текст резолвится как field:-выражение или литерал.
+            // После setError цикл execute() увидит hasError() и прервёт обход блоков.
+            if (isset($action['error'])) {
+                $errorMessage = is_array($action['error'])
+                    ? $this->fieldResolver->resolveParams($action['error'])
+                    : $this->fieldResolver->resolve($action['error']);
+
+                $this->context->setError(
+                    "execute.actions[{$actionIndex}].error",
+                    (string) $errorMessage,
+                    "Business validation error"
+                );
+
+                $this->context->log('ERROR', 'Execute', "Бизнес-ошибка в action #{$actionIndex}", [
+                    'message' => $errorMessage,
+                ]);
+
+                return;
+            }
+
             // v1.10.0: вложенный execute — рекурсивная обработка ветвлений.
             // Глубина не ограничена: switch → case → if → execute → if → ...
             if (isset($action['execute'])) {
