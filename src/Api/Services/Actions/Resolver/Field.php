@@ -102,6 +102,44 @@ class Field
     private const TEMPLATE_PATTERN = '/\{\{\s*(' . self::TEMPLATE_INNER . ')\s*\}\}/u';
 
 
+    // После существующих констант добавляю:
+
+    /**
+     * Префикс для date-выражений
+     * 
+     * @var string
+     */
+    private const PREFIX_DATE = 'date:';
+
+    /**
+     * Префикс для literal-escape (строка как есть, без резолва)
+     * 
+     * @var string
+     */
+    private const PREFIX_LITERAL = 'literal:';
+
+    /**
+     * Максимальная глубина рекурсии при резолве значений
+     * 
+     * @var int
+     */
+    private const MAX_RECURSION_DEPTH = 10;
+
+    /**
+     * Текущая глубина рекурсии (для защиты от циклов)
+     * 
+     * @var int
+     */
+    private int $recursionDepth = 0;
+
+    /**
+     * Множество посещённых путей (для защиты от циклических ссылок)
+     * 
+     * @var array
+     */
+    private array $visitedPaths = [];
+
+
     /**
      * Field constructor.
      * 
@@ -178,7 +216,21 @@ class Field
             return $expression;
         }
 
-        // СТАРАЯ СИНТАКСИС: чистые выражения и цепочки |
+        // v1.17.0: literal: — строка как есть, без резолва
+        if ($this->startsWith($expression, self::PREFIX_LITERAL)) {
+            $literal = substr($expression, strlen(self::PREFIX_LITERAL));
+            $this->context->log('SUCCESS', 'Field', 'Literal-escape', [
+                'literal' => $literal
+            ]);
+            return $literal;
+        }
+
+        // v1.17.0: date:"модификатор[; формат]"
+        if ($this->startsWith($expression, self::PREFIX_DATE)) {
+            return $this->resolveDateExpression($expression);
+        }
+
+        // СТАРЫЙ СИНТАКСИС: чистые выражения и цепочки |
         if ($this->startsWithKnownPrefix($expression)) {
             if (strpos($expression, self::ALTERNATIVE_SEPARATOR) !== false) {
                 return $this->resolveAlternatives($expression);
@@ -187,7 +239,7 @@ class Field
             return $this->resolvePrefixed($expression);
         }
 
-        // НОВАЯ СИНТАКСИС: шаблоны {{ }}
+        // НОВЫЙ СИНТАКСИС: шаблоны {{ }}
         if (
             strpos($expression, self::TEMPLATE_OPEN) !== false
             && preg_match(self::TEMPLATE_PATTERN, $expression)
@@ -212,7 +264,16 @@ class Field
             || $this->startsWith($expression, self::PREFIX_FUNC)
             || $this->startsWith($expression, self::PREFIX_METHOD)
             || $expression === self::PREFIX_RESULT
-            || $this->startsWith($expression, self::PREFIX_RESULT . ':');
+            || $this->startsWith($expression, self::PREFIX_RESULT . ':')
+            || $this->startsWith($expression, self::PREFIX_DATE)      // v1.17.0
+            || $this->startsWith($expression, self::PREFIX_LITERAL);  // v1.17.0
+    }
+
+    private function isValueExpression(string $value): bool
+    {
+        return $this->startsWith($value, self::PREFIX_FIELD)
+            || $this->startsWith($value, self::PREFIX_DATE)
+            || $this->startsWith($value, self::PREFIX_LITERAL);
     }
 
     /**
@@ -290,6 +351,114 @@ class Field
     }
 
     /**
+     * Разрешает date-выражение (v1.17.0)
+     * 
+     * Формат:
+     * - date:"+1 day" — now + модификатор
+     * - date:"-2 hours; d.m.Y H:i" — now + модификатор, свой формат
+     * - date:"@field:appointment_at +1 day" — база из поля + модификатор
+     * - date:"@field:test_drive_at; d.m.Y" — база + формат
+     * 
+     * @param string $expression Выражение date:"..."
+     * @return string|null Отформатированная дата или null при ошибке
+     */
+    private function resolveDateExpression(string $expression): ?string
+    {
+        // Извлекаем содержимое date:"..."
+        if (!preg_match('/^date:"(.+)"$/u', $expression, $matches)) {
+            $this->context->log('ERROR', 'Field', 'Неверный формат date-выражения', [
+                'expression' => $expression
+            ]);
+            return null;
+        }
+
+        $inner = $matches[1];
+
+        // Разделяем модификатор и формат по ;
+        $parts = $this->splitTopLevel($inner, ';');
+        $modifier = trim($parts[0] ?? '');
+        $format = trim($parts[1] ?? 'd.m.Y H:i:s');
+
+        if (empty($modifier)) {
+            $this->context->log('ERROR', 'Field', 'Пустой модификатор в date-выражении', [
+                'expression' => $expression
+            ]);
+            return null;
+        }
+
+        $this->context->log('INFO', 'Field', 'Разрешение date-выражения', [
+            'modifier' => $modifier,
+            'format' => $format
+        ]);
+
+        // Определяем базу (now или поле)
+        $baseTime = time();
+        $actualModifier = $modifier;
+
+        // Если модификатор начинается с @field:... — извлекаем базу
+        if (strpos($modifier, '@') === 0) {
+            $atPos = strpos($modifier, ' ', 1);
+
+            if ($atPos === false) {
+                // База без модификатора: date:"@field:x[; формат]"
+                $baseExpression = substr($modifier, 1);
+                $actualModifier = '';
+            } else {
+                $baseExpression = substr($modifier, 1, $atPos - 1);
+                $actualModifier = trim(substr($modifier, $atPos + 1));
+            }
+
+            // Резолвим базу (рекурсивно, если это field:...)
+            $baseValue = $this->resolve($baseExpression);
+
+            if (empty($baseValue)) {
+                $this->context->log('ERROR', 'Field', 'База date-выражения пуста', [
+                    'base_expression' => $baseExpression
+                ]);
+                return null;
+            }
+
+            // Парсим базу как дату
+            $baseTime = strtotime($baseValue);
+            if ($baseTime === false) {
+                $this->context->log('ERROR', 'Field', 'Не удалось распарсить базу как дату', [
+                    'base_value' => $baseValue
+                ]);
+                return null;
+            }
+
+            $this->context->log('INFO', 'Field', 'База date-выражения разрешена', [
+                'base_expression' => $baseExpression,
+                'base_value' => $baseValue,
+                'base_time' => date('Y-m-d H:i:s', $baseTime)
+            ]);
+        }
+
+        // Применяем модификатор к базе (пустой модификатор — база как есть)
+        $resultTime = $actualModifier === ''
+            ? $baseTime
+            : strtotime($actualModifier, $baseTime);
+
+        if ($resultTime === false) {
+            $this->context->log('ERROR', 'Field', 'Не удалось применить модификатор к базе', [
+                'modifier' => $actualModifier,
+                'base_time' => date('Y-m-d H:i:s', $baseTime)
+            ]);
+            return null;
+        }
+
+        // Форматируем результат
+        $result = date($format, $resultTime);
+
+        $this->context->log('SUCCESS', 'Field', 'Date-выражение разрешено', [
+            'expression' => $expression,
+            'result' => $result
+        ]);
+
+        return $result;
+    }
+
+    /**
      * Разрешает цепочку альтернатив
      * 
      * Пример: "field:CONTACT.PHONE|field:COMPANY.PHONE|field:phone"
@@ -347,25 +516,95 @@ class Field
 
         $this->context->log('INFO', 'Field', "Разрешение поля: {$path}");
 
-        // v1.7.0 dynamic-key-access: путь со скобками — новый walker
-        if (strpos($path, '[') !== false) {
-            return $this->resolveFieldPath($path);
-        }
-
-        if (!$this->context->has($path)) {
-            $this->context->log('INFO', 'Field', "Поле не найдено: {$path}", [
-                'available_keys' => array_keys($this->context->data)
+        // Защита от циклических ссылок
+        if (isset($this->visitedPaths[$path])) {
+            $this->context->log('ERROR', 'Field', "Обнаружена циклическая ссылка: {$path}", [
+                'visited' => array_keys($this->visitedPaths)
             ]);
             return null;
         }
 
-        $value = $this->context->get($path);
+        // Проверка лимита рекурсии
+        if ($this->recursionDepth >= self::MAX_RECURSION_DEPTH) {
+            $this->context->log('ERROR', 'Field', "Превышен лимит рекурсии ({$this->recursionDepth})", [
+                'path' => $path
+            ]);
+            return null;
+        }
 
-        $this->context->log('SUCCESS', 'Field', "Поле разрешено: {$path}", [
-            'value' => $value
-        ]);
+        // Помечаем путь как посещённый
+        $this->visitedPaths[$path] = true;
+        $this->recursionDepth++;
 
-        return $value;
+        try {
+            // v1.7.0 dynamic-key-access: путь со скобками — новый walker
+            if (strpos($path, '[') !== false) {
+                $value = $this->resolveFieldPath($path);
+            } else {
+                if (!$this->context->has($path)) {
+                    $this->context->log('INFO', 'Field', "Поле не найдено: {$path}", [
+                        'available_keys' => array_keys($this->context->data)
+                    ]);
+                    return null;
+                }
+
+                $value = $this->context->get($path);
+            }
+
+            $this->context->log('INFO', 'Field', "Поле получено: {$path}", [
+                'value_type' => gettype($value)
+            ]);
+
+            // v1.17.0: рекурсивный резолв — если значение строка с префиксом, резолвим её
+            if (is_string($value) && $this->isValueExpression($value)) {
+                $this->context->log('INFO', 'Field', "Рекурсивный резолв значения поля: {$path}", [
+                    'value' => $value
+                ]);
+
+                $value = $this->resolve($value);
+            }
+
+            // v1.17.0: если значение — массив, проходим по нему рекурсивно
+            if (is_array($value)) {
+                $value = $this->resolveArrayValues($value);
+            }
+
+            $this->context->log('SUCCESS', 'Field', "Поле разрешено: {$path}", [
+                'value' => $value
+            ]);
+
+            return $value;
+        } finally {
+            // Убираем путь из посещённых (backtrack)
+            unset($this->visitedPaths[$path]);
+            $this->recursionDepth--;
+        }
+    }
+
+    /**
+     * Рекурсивно разрешает строки-выражения внутри массива (v1.17.0)
+     * 
+     * @param array $array Массив
+     * @return array Массив с разрешёнными значениями
+     */
+    private function resolveArrayValues(array $array): array
+    {
+        $resolved = [];
+
+        foreach ($array as $key => $value) {
+            if (is_array($value)) {
+                // Рекурсивно обрабатываем вложенные массивы
+                $resolved[$key] = $this->resolveArrayValues($value);
+            } elseif (is_string($value) && $this->isValueExpression($value)) {
+                // Строка с префиксом — резолвим
+                $resolved[$key] = $this->resolve($value);
+            } else {
+                // Остальное — как есть
+                $resolved[$key] = $value;
+            }
+        }
+
+        return $resolved;
     }
 
     /**

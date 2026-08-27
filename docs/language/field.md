@@ -202,6 +202,65 @@ execute, compose, curl, conditions и шаблоны `{{ }}`.
 
 ---
 
+## Рекурсивный резолв значений (v1.17.0)
+
+Значения в контексте сами могут быть выражениями. Если `field:x`
+разрешился в строку с префиксом `field:` / `date:` / `literal:` —
+она разрешается дальше, до конечного значения:
+
+```php
+// контекст: ref1 = 'field:ref2', ref2 = 'field:final', final = 42
+'field:ref1'   // → 42
+```
+
+Массивы обходятся рекурсивно — строки-выражения разрешаются
+на любой глубине:
+
+```php
+// контекст: config = ['name' => 'field:product_name', 'n' => ['id' => 'field:product_id']]
+'field:config' // → ['name' => 'iPhone', 'n' => ['id' => 123]]
+```
+
+Защита: лимит глубины 10 и контроль циклов
+(`field:a → field:b → field:a` → null + ERROR в лог).
+Рекурсивно разрешаются только `field:` / `date:` / `literal:` —
+строки `func:` / `method:` / `result` в данных остаются как есть.
+
+## Date-выражения (v1.17.0)
+
+Вычисление дат через strtotime(). Работает **и напрямую в конфиге,
+и через данные** (HL-блоки):
+
+```php
+'date:"+1 day"'                        // now + 1 день, формат d.m.Y H:i:s
+'date:"-2 hours; d.m.Y H:i"'          // now − 2 часа, свой формат
+'date:"+4 minutes"'                   // now + 4 минуты
+'date:"@field:appointment_at +1 day"' // база из поля + модификатор
+'date:"@field:test_drive_at; d.m.Y"'  // база из поля, только дата
+'date:"tomorrow; d.m.Y"'              // любые strtotime-модификаторы
+```
+
+Грамматика: `date:"<модификатор>[; <формат>]"`; база задаётся как
+`@<выражение> <модификатор>` (по умолчанию база = now).
+Формат по умолчанию `d.m.Y H:i:s`. Ошибка парсинга → null + ERROR в лог.
+
+Кейс: поле HL `UF_DEADLINE_ACTIVITY` хранит `field:appointment_at`
+или `date:"+1 day"`; в конфиге пишется
+`'field:params.settings.UF_DEADLINE_ACTIVITY'` — движок сам
+до-разрешает значение до конечной даты.
+
+## Literal escape (v1.17.0)
+
+Если данные начинаются с `field:` / `date:`, но должны остаться
+текстом — префикс `literal:`:
+
+```php
+'literal:field:test'    // → строка "field:test" как есть
+'literal:date:"+1 day"' // → строка 'date:"+1 day"' как есть
+```
+
+---
+
 ## Куда дальше
 
 - [Условия](conditions.md)

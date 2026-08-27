@@ -20,7 +20,7 @@ use Api\Services\Actions\Resolver\Field;
  * 
  * Лог: Field_YYYY-MM-DD_HH-II-SS.log
  * 
- * Всего тестов: 28
+ * Всего тестов: 52
  * 
  * @package Api\Services\Actions\Testing
  */
@@ -130,6 +130,17 @@ class FieldTest
         $this->testDynamicKeyNullKey();
         $this->testDynamicKeyChainWithBrackets();
         $this->testDynamicKeyInsideTemplate();
+
+        // Рекурсивный резолв и date-выражения (v1.17.0)
+        $this->testRecursiveFieldScalar();
+        $this->testRecursiveFieldArray();
+        $this->testRecursiveCycleProtection();
+        $this->testDateExpressionNow();
+        $this->testDateExpressionFormat();
+        $this->testDateExpressionWithBase();
+        $this->testLiteralEscape();
+        $this->testDateExpressionBaseOnly();
+        $this->testRecursiveArrayKeepsFuncStrings();
 
         $this->logger->summary($this->passed, $this->failed);
 
@@ -1172,6 +1183,212 @@ class FieldTest
             $resolver->resolve('Статус: {{pr_hl[field:index_code]}}'),
             'Шорткат со скобками работает в шаблоне',
             ['expression' => 'Статус: {{pr_hl[field:index_code]}}']
+        );
+    }
+
+    // ========================================================
+    // РЕКУРСИВНЫЙ РЕЗОЛВ И DATE-ВЫРАЖЕНИЯ (v1.17.0)
+    // ========================================================
+
+    /**
+     * Тест: рекурсивный резолв скаляров field: → field: → значение
+     */
+    private function testRecursiveFieldScalar(): void
+    {
+        $this->logger->separator('testRecursiveFieldScalar');
+
+        $context = new Context([
+            'ref1' => 'field:ref2',
+            'ref2' => 'field:final',
+            'final' => 42,
+        ]);
+        $context->setTestLogger($this->logger);
+        $resolver = new Field($context);
+
+        $this->assert(
+            'testRecursiveFieldScalar',
+            42,
+            $resolver->resolve('field:ref1'),
+            'field:ref1 → field:ref2 → field:final → 42',
+            ['expression' => 'field:ref1']
+        );
+    }
+
+    /**
+     * Тест: рекурсивный резолв в массивах любой глубины
+     */
+    private function testRecursiveFieldArray(): void
+    {
+        $this->logger->separator('testRecursiveFieldArray');
+
+        $context = new Context([
+            'config' => [
+                'name' => 'field:product_name',
+                'nested' => ['id' => 'field:product_id'],
+            ],
+            'product_name' => 'iPhone',
+            'product_id' => 123,
+        ]);
+        $context->setTestLogger($this->logger);
+        $resolver = new Field($context);
+
+        $this->assert(
+            'testRecursiveFieldArray',
+            ['name' => 'iPhone', 'nested' => ['id' => 123]],
+            $resolver->resolve('field:config'),
+            'Строки-выражения разрешаются внутри массивов на любой глубине',
+            ['expression' => 'field:config']
+        );
+    }
+
+    /**
+     * Тест: циклическая ссылка → null без fatal
+     */
+    private function testRecursiveCycleProtection(): void
+    {
+        $this->logger->separator('testRecursiveCycleProtection');
+
+        $context = new Context(['a' => 'field:b', 'b' => 'field:a']);
+        $context->setTestLogger($this->logger);
+        $resolver = new Field($context);
+
+        $this->assert(
+            'testRecursiveCycleProtection',
+            null,
+            $resolver->resolve('field:a'),
+            'Цикл field:a → field:b → field:a возвращает null без fatal',
+            ['expression' => 'field:a']
+        );
+    }
+
+    /**
+     * Тест: date:"+1 day" — now + модификатор, формат по умолчанию
+     */
+    private function testDateExpressionNow(): void
+    {
+        $this->logger->separator('testDateExpressionNow');
+
+        $context = new Context([]);
+        $context->setTestLogger($this->logger);
+        $resolver = new Field($context);
+
+        $this->assert(
+            'testDateExpressionNow',
+            date('d.m.Y H:i:s', strtotime('+1 day')),
+            $resolver->resolve('date:"+1 day"'),
+            'date:"+1 day" → текущее время + 1 день, формат d.m.Y H:i:s',
+            ['expression' => 'date:"+1 day"']
+        );
+    }
+
+    /**
+     * Тест: date с собственным форматом
+     */
+    private function testDateExpressionFormat(): void
+    {
+        $this->logger->separator('testDateExpressionFormat');
+
+        $context = new Context([]);
+        $context->setTestLogger($this->logger);
+        $resolver = new Field($context);
+
+        $this->assert(
+            'testDateExpressionFormat',
+            date('d.m.Y H:i', strtotime('-2 hours')),
+            $resolver->resolve('date:"-2 hours; d.m.Y H:i"'),
+            'date:"-2 hours; d.m.Y H:i" → свой формат вывода',
+            ['expression' => 'date:"-2 hours; d.m.Y H:i"']
+        );
+    }
+
+    /**
+     * Тест: date с базой из поля
+     */
+    private function testDateExpressionWithBase(): void
+    {
+        $this->logger->separator('testDateExpressionWithBase');
+
+        $context = new Context(['appointment_at' => '2026-09-01 14:00:00']);
+        $context->setTestLogger($this->logger);
+        $resolver = new Field($context);
+
+        $this->assert(
+            'testDateExpressionWithBase',
+            date('d.m.Y H:i', strtotime('+2 hours', strtotime('2026-09-01 14:00:00'))),
+            $resolver->resolve('date:"@field:appointment_at +2 hours; d.m.Y H:i"'),
+            'База @field: + модификатор + свой формат',
+            ['expression' => 'date:"@field:appointment_at +2 hours; d.m.Y H:i"']
+        );
+    }
+
+    /**
+     * Тест: literal: — текст с префиксами остаётся как есть
+     */
+    private function testLiteralEscape(): void
+    {
+        $this->logger->separator('testLiteralEscape');
+
+        $context = new Context([]);
+        $context->setTestLogger($this->logger);
+        $resolver = new Field($context);
+
+        $this->assert(
+            'testLiteralEscape_Field',
+            'field:test',
+            $resolver->resolve('literal:field:test'),
+            'literal:field:test → строка "field:test" без резолва',
+            ['expression' => 'literal:field:test']
+        );
+
+        $this->assert(
+            'testLiteralEscape_Date',
+            'date:"+1 day"',
+            $resolver->resolve('literal:date:"+1 day"'),
+            'literal:date:"..." → строка как есть',
+            ['expression' => 'literal:date:"+1 day"']
+        );
+    }
+
+    /**
+     * Тест: база без модификатора — просто форматируем дату поля
+     */
+    private function testDateExpressionBaseOnly(): void
+    {
+        $this->logger->separator('testDateExpressionBaseOnly');
+
+        $context = new Context(['test_drive_at' => '2026-09-05 10:00:00']);
+        $context->setTestLogger($this->logger);
+        $resolver = new Field($context);
+
+        $this->assert(
+            'testDateExpressionBaseOnly',
+            date('d.m.Y', strtotime('2026-09-05 10:00:00')),
+            $resolver->resolve('date:"@field:test_drive_at; d.m.Y"'),
+            'База без модификатора: дата поля в заданном формате',
+            ['expression' => 'date:"@field:test_drive_at; d.m.Y"']
+        );
+    }
+
+    /**
+     * Тест: func:/method:/result в данных НЕ резолвятся рекурсивно
+     */
+    private function testRecursiveArrayKeepsFuncStrings(): void
+    {
+        $this->logger->separator('testRecursiveArrayKeepsFuncStrings');
+
+        $context = new Context([
+            'data' => ['check' => 'func:empty', 'ref' => 'field:x'],
+            'x' => 7,
+        ]);
+        $context->setTestLogger($this->logger);
+        $resolver = new Field($context);
+
+        $this->assert(
+            'testRecursiveArrayKeepsFuncStrings',
+            ['check' => 'func:empty', 'ref' => 7],
+            $resolver->resolve('field:data'),
+            'field: в данных резолвится, func: остаётся строкой',
+            ['expression' => 'field:data']
         );
     }
     
