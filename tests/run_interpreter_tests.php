@@ -106,11 +106,13 @@ use Api\Services\Actions\Testing\CurlTest;
 use Api\Services\Actions\Testing\ComposeTest;
 use Api\Services\Actions\Testing\ArrayFilterTest;
 use Api\Services\Actions\Testing\ArrayTransformerTest;
+use Api\Services\Actions\Testing\FormulaTest;
 
 $testClasses = [
     'Field Resolver'       => FieldTest::class,
     'Condition Resolver'   => ConditionTest::class,
     'Method Resolver'      => MethodTest::class,
+    'Formula Resolver'       => FormulaTest::class,
     'Request Executor'     => RequestTest::class,
     'Mapping Executor'     => MappingTest::class,
     'Execute Executor'     => ExecuteTest::class,

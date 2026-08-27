@@ -79,6 +79,24 @@ class Field
     private $lastResult = null;
 
     /**
+     * Вычислитель формул (v1.18.0). Инжектится Interpreter'ом.
+     * 
+     * @var Formula|null
+     */
+    private ?Formula $formulaResolver = null;
+
+    /**
+     * Инжектит вычислитель формул (v1.18.0)
+     * 
+     * @param Formula $formulaResolver
+     * @return void
+     */
+    public function setFormulaResolver(Formula $formulaResolver): void
+    {
+        $this->formulaResolver = $formulaResolver;
+    }
+
+    /**
      * Открывающий маркер шаблонного плейсхолдера
      * 
      * @var string
@@ -228,6 +246,12 @@ class Field
         // v1.17.0: date:"модификатор[; формат]"
         if ($this->startsWith($expression, self::PREFIX_DATE)) {
             return $this->resolveDateExpression($expression);
+        }
+
+        // v1.18.0: формулы — постфикс ++/--/+N/-N на field:/result:.
+        // Грамматика живёт в Formula::isFormula(); Field только делегирует.
+        if ($this->formulaResolver !== null && Formula::isFormula($expression)) {
+            return $this->formulaResolver->evaluate($expression);
         }
 
         // СТАРЫЙ СИНТАКСИС: чистые выражения и цепочки |

@@ -5,6 +5,7 @@ namespace Api\Services\Actions;
 use Api\Services\Actions\Resolver\Field;
 use Api\Services\Actions\Resolver\Condition;
 use Api\Services\Actions\Resolver\Method;
+use Api\Services\Actions\Resolver\Formula;
 use Api\Services\Actions\Executor\Request;
 use Api\Services\Actions\Executor\Mapping;
 use Api\Services\Actions\Executor\Execute;
@@ -379,6 +380,10 @@ class Interpreter
         }
 
         $this->fieldResolver = new Field($this->context);
+        // v1.18.0: вычислитель формул инжектится в Field
+        $this->fieldResolver->setFormulaResolver(
+            new Formula($this->context, $this->fieldResolver)
+        );
         $this->conditionResolver = new Condition($this->context, $this->fieldResolver);
         $this->methodResolver = new Method($this->context, $this->fieldResolver);
 
