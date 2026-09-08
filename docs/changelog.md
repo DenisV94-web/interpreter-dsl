@@ -8,6 +8,36 @@
 
 ---
 
+## [1.19.1] — 2026-08-28
+
+### Добавлено
+
+- **item-шаблоны в `ArrayTransformer::toSelectOptions`**: строковое
+  правило маппинга с плейсхолдерами `{{item:PATH}}` резолвится по
+  текущей строке списка:
+  - точечная нотация: `{{item:DEPT.TITLE}}`;
+  - null → `''` (Twig-семантика), boolean → `'1'`/`'0'`;
+  - итоговая строка trim'ится (хвостовые пробелы от null-полей);
+  - обычные строковые правила («имя поля») и `fn`+`args` не затронуты.
+
+Пример:
+
+```php
+'users' => [
+    'method' => 'toSelectOptions',
+    'class'  => \Api\Services\ArrayTransformer::class,
+    'params' => [
+        'field:USERS_BY_DEP',
+        [
+            'id_user' => 'ID',
+            'fio'     => '{{item:LAST_NAME}} {{item:NAME}} {{item:SECOND_NAME}}',
+        ],
+    ],
+],
+```
+
+---
+
 ## [1.19.0] — 2026-08-28
 
 ### Добавлено

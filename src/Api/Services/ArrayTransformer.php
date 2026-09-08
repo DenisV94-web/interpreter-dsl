@@ -55,6 +55,12 @@ class ArrayTransformer
     {
         // Строка — прямой доступ к полю
         if (is_string($config)) {
+            // v1.18.2: шаблон с {{item:X}} — резолвим как текст с плейсхолдерами
+            if (strpos($config, '{{item:') !== false) {
+                return $this->resolveItemTemplate($config, $item);
+            }
+
+            // Обычная строка — прямой доступ к полю
             return $item[$config] ?? null;
         }
 
@@ -104,6 +110,71 @@ class ArrayTransformer
             $resolved[] = $arg;
         }
         return $resolved;
+    }
+
+    /**
+     * Резолвит строковый шаблон с {{item:X}} по текущей строке (v1.18.2).
+     * 
+     * Семантика:
+     * - {{item:PATH}} → значение по пути (поддержка точечной нотации item:A.B);
+     * - null → '' (Twig-семантика);
+     * - итог trim'ится, чтобы убрать хвостовые пробелы от null-полей
+     *   (например 'LAST_NAME NAME ' без отчества → 'LAST_NAME NAME').
+     * 
+     * @param string $template Шаблон с плейсхолдерами
+     * @param array $item Текущая строка
+     * @return string Разрешённая и обрезанная строка
+     */
+    private function resolveItemTemplate(string $template, array $item): string
+    {
+        $result = preg_replace_callback(
+            '/\{\{\s*item:([A-Za-z0-9_А-Яа-я.]+)\s*\}\}/u',
+            function (array $matches) use ($item) {
+                $path = $matches[1];
+                $value = $this->getItemValueByPath($item, $path);
+
+                if ($value === null) {
+                    return '';
+                }
+
+                if (is_array($value) || is_object($value)) {
+                    return '';
+                }
+
+                if (is_bool($value)) {
+                    return $value ? '1' : '0';
+                }
+
+                return (string) $value;
+            },
+            $template
+        );
+
+        return trim($result);
+    }
+
+    /**
+     * Берёт значение из item по пути с поддержкой точечной нотации.
+     * 
+     * @param array $item Текущая строка
+     * @param string $path Путь (напр. 'LAST_NAME' или 'DEPT.NAME')
+     * @return mixed Значение или null
+     */
+    private function getItemValueByPath(array $item, string $path)
+    {
+        if (strpos($path, '.') === false) {
+            return $item[$path] ?? null;
+        }
+
+        $current = $item;
+        foreach (explode('.', $path) as $segment) {
+            if (!is_array($current) || !array_key_exists($segment, $current)) {
+                return null;
+            }
+            $current = $current[$segment];
+        }
+
+        return $current;
     }
 
     /**

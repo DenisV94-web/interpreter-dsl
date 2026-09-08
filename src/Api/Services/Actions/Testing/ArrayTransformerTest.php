@@ -10,7 +10,7 @@ use Api\Services\ArrayTransformer;
  * Тесты сервиса ArrayTransformer: перегруппировка списков,
  * переименование полей, декларативные трансформации через fn+args.
  * 
- * Всего тестов: 7
+ * Всего тестов: 11
  * 
  * @package Api\Services\Actions\Testing
  */
@@ -37,6 +37,11 @@ class ArrayTransformerTest
         $this->testToSelectOptionsWithTransform();
         $this->testToSelectOptionsChained();
         $this->testApplyInstructions();
+
+        // item-шаблоны в toSelectOptions (v1.19.1)
+        $this->testToSelectOptionsItemTemplate();
+        $this->testToSelectOptionsItemTemplateNull();
+        $this->testToSelectOptionsItemTemplateNested();
 
         $this->logger->summary($this->passed, $this->failed);
 
@@ -312,6 +317,75 @@ class ArrayTransformerTest
             [],
             $t->applyInstructions(null, []),
             'null-инструкции (пустой JSON) дают пустой массив',
+            []
+        );
+    }
+
+    /**
+     * item-шаблон: склейка полей текущей строки (v1.19.1)
+     */
+    private function testToSelectOptionsItemTemplate(): void
+    {
+        $this->logger->separator('testToSelectOptionsItemTemplate');
+        $t = new ArrayTransformer();
+
+        $result = $t->toSelectOptions(
+            [['ID' => 1, 'LAST_NAME' => 'Иванов', 'NAME' => 'Иван', 'SECOND_NAME' => 'Иванович']],
+            [
+                'id_user' => 'ID',
+                'fio'     => '{{item:LAST_NAME}} {{item:NAME}} {{item:SECOND_NAME}}',
+            ]
+        );
+
+        $this->assert(
+            'testToSelectOptionsItemTemplate',
+            [['id_user' => 1, 'fio' => 'Иванов Иван Иванович']],
+            $result,
+            'item-шаблон склеивает поля текущей строки',
+            []
+        );
+    }
+
+    /**
+     * item-шаблон с null-полем: null → '' + trim хвоста (v1.19.1)
+     */
+    private function testToSelectOptionsItemTemplateNull(): void
+    {
+        $this->logger->separator('testToSelectOptionsItemTemplateNull');
+        $t = new ArrayTransformer();
+
+        $result = $t->toSelectOptions(
+            [['LAST_NAME' => 'Иванов', 'NAME' => 'Иван', 'SECOND_NAME' => null]],
+            ['fio' => '{{item:LAST_NAME}} {{item:NAME}} {{item:SECOND_NAME}}']
+        );
+
+        $this->assert(
+            'testToSelectOptionsItemTemplateNull',
+            [['fio' => 'Иванов Иван']],
+            $result,
+            'null в item-шаблоне → "" и trim убирает хвостовой пробел',
+            []
+        );
+    }
+
+    /**
+     * item-шаблон с точечной нотацией (v1.19.1)
+     */
+    private function testToSelectOptionsItemTemplateNested(): void
+    {
+        $this->logger->separator('testToSelectOptionsItemTemplateNested');
+        $t = new ArrayTransformer();
+
+        $result = $t->toSelectOptions(
+            [['NAME' => 'Иван', 'DEPT' => ['TITLE' => 'Отдел продаж']]],
+            ['label' => '{{item:NAME}} ({{item:DEPT.TITLE}})']
+        );
+
+        $this->assert(
+            'testToSelectOptionsItemTemplateNested',
+            [['label' => 'Иван (Отдел продаж)']],
+            $result,
+            'item-шаблон с точечной нотацией item:DEPT.TITLE',
             []
         );
     }
