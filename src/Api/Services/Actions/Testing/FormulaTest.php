@@ -14,7 +14,7 @@ use Api\Services\Actions\Resolver\Formula;
  * 
  * Лог: Formula_YYYY-MM-DD_HH-II-SS.log
  * 
- * Всего тестов: 11
+ * Всего тестов: 23
  * 
  * @package Api\Services\Actions\Testing
  */
@@ -44,6 +44,20 @@ class FormulaTest
         $this->testBracketOperand();
         $this->testPlainFieldNoRegression();
         $this->testLiteralEscape();
+
+        // Фаза 2: бинарная арифметика (v1.19.0)
+        $this->testBinaryPrecedence();
+        $this->testBinaryParentheses();
+        $this->testBinaryDivision();
+        $this->testDivisionByZero();
+        $this->testUnaryMinus();
+        $this->testAutoDetectMultiplication();
+        $this->testAutoDetectSpacedMinus();
+        $this->testFormulaLiteralsOnly();
+        $this->testNestedParens();
+        $this->testNullOperandBinary();
+        $this->testLiteralDashNoRegression();
+        $this->testChainOperandInFormula();
 
         $this->logger->summary($this->passed, $this->failed);
 
@@ -218,6 +232,214 @@ class FormulaTest
             'field:x++',
             $resolver->resolve('literal:field:x++'),
             'literal:field:x++ → строка как есть',
+            []
+        );
+    }
+
+    // ========================================================
+    // ФАЗА 2: БИНАРНАЯ АРИФМЕТИКА (v1.19.0)
+    // ========================================================
+
+    /**
+     * Тест: приоритеты — * раньше +
+     */
+    private function testBinaryPrecedence(): void
+    {
+        $this->logger->separator('testBinaryPrecedence');
+        $resolver = $this->makeResolver(['a' => 2, 'b' => 3, 'c' => 4]);
+
+        $this->assert(
+            'testBinaryPrecedence',
+            14,
+            $resolver->resolve('formula:field:a + field:b * field:c'),
+            '2 + 3*4 = 14 (приоритет *)',
+            []
+        );
+    }
+
+    /**
+     * Тест: скобки меняют приоритет
+     */
+    private function testBinaryParentheses(): void
+    {
+        $this->logger->separator('testBinaryParentheses');
+        $resolver = $this->makeResolver(['a' => 2, 'b' => 3, 'c' => 4]);
+
+        $this->assert(
+            'testBinaryParentheses',
+            20,
+            $resolver->resolve('formula:(field:a + field:b) * field:c'),
+            '(2+3)*4 = 20',
+            []
+        );
+    }
+
+    /**
+     * Тест: деление
+     */
+    private function testBinaryDivision(): void
+    {
+        $this->logger->separator('testBinaryDivision');
+        $resolver = $this->makeResolver(['c' => 4]);
+
+        $this->assert(
+            'testBinaryDivision',
+            2,
+            $resolver->resolve('formula:field:c / 2'),
+            '4 / 2 = 2',
+            []
+        );
+    }
+
+    /**
+     * Тест: деление на ноль → null
+     */
+    private function testDivisionByZero(): void
+    {
+        $this->logger->separator('testDivisionByZero');
+        $resolver = $this->makeResolver(['a' => 2]);
+
+        $this->assert(
+            'testDivisionByZero',
+            null,
+            $resolver->resolve('formula:field:a / 0'),
+            'Деление на ноль → null',
+            []
+        );
+    }
+
+    /**
+     * Тест: унарный минус
+     */
+    private function testUnaryMinus(): void
+    {
+        $this->logger->separator('testUnaryMinus');
+        $resolver = $this->makeResolver(['a' => 2]);
+
+        $this->assert(
+            'testUnaryMinus',
+            3,
+            $resolver->resolve('formula:-field:a + 5'),
+            '-2 + 5 = 3',
+            []
+        );
+    }
+
+    /**
+     * Тест: автодетект без префикса — умножение
+     */
+    private function testAutoDetectMultiplication(): void
+    {
+        $this->logger->separator('testAutoDetectMultiplication');
+        $resolver = $this->makeResolver(['price' => '100']);
+
+        $this->assert(
+            'testAutoDetectMultiplication',
+            118.0,
+            $resolver->resolve('field:price * 1.18'),
+            'field:price * 1.18 → 118.0 (автодетект по *)',
+            []
+        );
+    }
+
+    /**
+     * Тест: автодетект — минус с пробелами
+     */
+    private function testAutoDetectSpacedMinus(): void
+    {
+        $this->logger->separator('testAutoDetectSpacedMinus');
+        $resolver = $this->makeResolver(['b' => 3]);
+
+        $this->assert(
+            'testAutoDetectSpacedMinus',
+            2,
+            $resolver->resolve('field:b - 1'),
+            'field:b - 1 → 2 (автодетект по " - ")',
+            []
+        );
+    }
+
+    /**
+     * Тест: чистые литералы
+     */
+    private function testFormulaLiteralsOnly(): void
+    {
+        $this->logger->separator('testFormulaLiteralsOnly');
+        $resolver = $this->makeResolver([]);
+
+        $this->assert(
+            'testFormulaLiteralsOnly',
+            14,
+            $resolver->resolve('formula:2 + 3 * 4'),
+            '2 + 3*4 = 14 без полей',
+            []
+        );
+    }
+
+    /**
+     * Тест: вложенные скобки
+     */
+    private function testNestedParens(): void
+    {
+        $this->logger->separator('testNestedParens');
+        $resolver = $this->makeResolver([]);
+
+        $this->assert(
+            'testNestedParens',
+            15,
+            $resolver->resolve('formula:((2 + 3) * (4 - 1))'),
+            '((2+3)*(4-1)) = 15',
+            []
+        );
+    }
+
+    /**
+     * Тест: null-операнд в бинарной формуле → null
+     */
+    private function testNullOperandBinary(): void
+    {
+        $this->logger->separator('testNullOperandBinary');
+        $resolver = $this->makeResolver([]);
+
+        $this->assert(
+            'testNullOperandBinary',
+            null,
+            $resolver->resolve('formula:field:missing + 1'),
+            'null-операнд → null',
+            []
+        );
+    }
+
+    /**
+     * Тест: дефис без пробелов НЕ формула (обратная совместимость)
+     */
+    private function testLiteralDashNoRegression(): void
+    {
+        $this->logger->separator('testLiteralDashNoRegression');
+        $resolver = $this->makeResolver(['a-b' => 7]);
+
+        $this->assert(
+            'testLiteralDashNoRegression',
+            7,
+            $resolver->resolve('field:a-b'),
+            'field:a-b остаётся обычным путём',
+            []
+        );
+    }
+
+    /**
+     * Тест: цепочка | внутри операнда формулы
+     */
+    private function testChainOperandInFormula(): void
+    {
+        $this->logger->separator('testChainOperandInFormula');
+        $resolver = $this->makeResolver(['a' => null, 'b' => 5]);
+
+        $this->assert(
+            'testChainOperandInFormula',
+            10,
+            $resolver->resolve('formula:(field:a|field:b) * 2'),
+            '(a или b) * 2 = 10',
             []
         );
     }
