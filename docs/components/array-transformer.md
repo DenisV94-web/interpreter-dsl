@@ -147,6 +147,32 @@ Field Resolver'ом и доходит до сервиса как литерал,
 
 ---
 
+## toMap — список в карту (v1.20.0)
+
+Декларативный аналог JS `list.forEach(v => { map[v[key]] = v[value]; })`:
+
+```php
+'primary_result_codes' => [
+    'method' => 'toMap',
+    'class'  => \Api\Services\ArrayTransformer::class,
+    'params' => [
+        'field:primary_results',   // исходный список
+        'value',                   // поле-ключ
+        'label',                   // поле-значение
+    ],
+],
+```
+
+Результат: `{'A': 'Alpha', 'B': 'Beta'}` — готовая карта для выдачи
+фронту (без сборки в JS) и для точечных луков в конфиге:
+`field:primary_result_codes[field:code]`.
+
+- строка без поля-ключа → пропускается;
+- дубли ключа → побеждает последний;
+- нет поля-значения → `null` под этим ключом.
+
+---
+
 ## applyInstructions — инструкции изменения полей (v1.14.0)
 
 Применяет инструкции из декодированного JSON-маппинга

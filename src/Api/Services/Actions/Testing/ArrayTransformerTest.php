@@ -43,6 +43,10 @@ class ArrayTransformerTest
         $this->testToSelectOptionsItemTemplateNull();
         $this->testToSelectOptionsItemTemplateNested();
 
+        // toMap (v1.20.0)
+        $this->testToMapBasic();
+        $this->testToMapEdgeCases();
+
         $this->logger->summary($this->passed, $this->failed);
 
         echo "\n========================================\n";
@@ -386,6 +390,60 @@ class ArrayTransformerTest
             [['label' => 'Иван (Отдел продаж)']],
             $result,
             'item-шаблон с точечной нотацией item:DEPT.TITLE',
+            []
+        );
+    }
+
+    /**
+     * toMap: список → карта «ключ → значение» (v1.20.0)
+     */
+    private function testToMapBasic(): void
+    {
+        $this->logger->separator('testToMapBasic');
+        $t = new ArrayTransformer();
+
+        $result = $t->toMap(
+            [
+                ['value' => 'A', 'label' => 'Alpha'],
+                ['value' => 'B', 'label' => 'Beta'],
+            ],
+            'value',
+            'label'
+        );
+
+        $this->assert(
+            'testToMapBasic',
+            ['A' => 'Alpha', 'B' => 'Beta'],
+            $result,
+            'toMap собирает карту из списка',
+            []
+        );
+    }
+
+    /**
+     * toMap: крайние случаи — нет ключа, дубли, нет значения
+     */
+    private function testToMapEdgeCases(): void
+    {
+        $this->logger->separator('testToMapEdgeCases');
+        $t = new ArrayTransformer();
+
+        $result = $t->toMap(
+            [
+                ['value' => 'A', 'label' => 'First'],
+                ['label' => 'NoKey'],
+                ['value' => 'A', 'label' => 'Second'],
+                ['value' => 'B'],
+            ],
+            'value',
+            'label'
+        );
+
+        $this->assert(
+            'testToMapEdgeCases',
+            ['A' => 'Second', 'B' => null],
+            $result,
+            'Строка без ключа пропускается, дубль перезаписывается, нет значения → null',
             []
         );
     }

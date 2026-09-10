@@ -45,6 +45,42 @@ class ArrayTransformer
     }
 
     /**
+     * Собирает карту «ключ → значение» из списка (v1.20.0).
+     * 
+     * Декларативный аналог JS:
+     * let map = {}; list.forEach(v => { map[v[keyField]] = v[valueField]; });
+     * 
+     * - строка без поля-ключа → пропускается;
+     * - дубли ключа → побеждает последний (как присваивание в JS);
+     * - нет поля-значения → null под этим ключом.
+     * 
+     * @param array $items Исходный список
+     * @param string $keyField Поле-ключ
+     * @param string $valueField Поле-значение
+     * @return array Карта
+     */
+    public function toMap(array $items, string $keyField, string $valueField): array
+    {
+        $map = [];
+
+        foreach ($items as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+
+            $key = $item[$keyField] ?? null;
+
+            if ($key === null) {
+                continue;
+            }
+
+            $map[$key] = $item[$valueField] ?? null;
+        }
+
+        return $map;
+    }
+
+    /**
      * Применяет одно правило маппинга к строке.
      * 
      * @param mixed $config Правило: строка или массив с fn/args
