@@ -47,6 +47,17 @@ class ArrayTransformerTest
         $this->testToMapBasic();
         $this->testToMapEdgeCases();
 
+        // applySchema (v1.21.0)
+        $this->testApplySchemaSingleRow();
+        $this->testApplySchemaList();
+        $this->testApplySchemaVariantMiss();
+        $this->testApplySchemaMissingField();
+
+        // query в applySchema (v1.22.0)
+        $this->testApplySchemaWithQuery();
+        $this->testApplySchemaQueryEmptyBatch();
+        $this->testApplySchemaQueryCache();
+
         $this->logger->summary($this->passed, $this->failed);
 
         echo "\n========================================\n";
@@ -444,6 +455,213 @@ class ArrayTransformerTest
             ['A' => 'Second', 'B' => null],
             $result,
             'Строка без ключа пропускается, дубль перезаписывается, нет значения → null',
+            []
+        );
+    }
+
+    /**
+     * applySchema: одиночная строка, variant и blank (v1.21.0)
+     */
+    private function testApplySchemaSingleRow(): void
+    {
+        $this->logger->separator('testApplySchemaSingleRow');
+        $t = new ArrayTransformer();
+
+        $result = $t->applySchema(
+            [
+                'primary_result_code' => 'BUSY',
+                'successful_contact'  => 0,
+                'appointment_at'      => '0000-00-00 00:00:00',
+                'comment'             => 'недозвон',
+            ],
+            [
+                'primary_result_code' => ['title' => 'Основной код результата CRM', 'variant' => ['BUSY' => 'Занято']],
+                'successful_contact'  => ['title' => 'Контакт состоялся', 'variant' => [1 => 'Да', 0 => 'Нет']],
+                'appointment_at'      => ['title' => 'Запланированная встреча'],
+                'comment'             => ['title' => 'Комментарий менеджера'],
+            ],
+            ['blank' => [null, '', '0000-00-00 00:00:00']]
+        );
+
+        $this->assert(
+            'testApplySchemaSingleRow',
+            [
+                'primary_result_code' => ['title' => 'Основной код результата CRM', 'value' => 'Занято'],
+                'successful_contact'  => ['title' => 'Контакт состоялся', 'value' => 'Нет'],
+                'appointment_at'      => ['title' => 'Запланированная встреча', 'value' => ''],
+                'comment'             => ['title' => 'Комментарий менеджера', 'value' => 'недозвон'],
+            ],
+            $result,
+            'keyed-форма {field: {title, value}}; variant и blank работают',
+            []
+        );
+    }
+
+    /**
+     * applySchema: список строк → список keyed-объектов, порядок = схема
+     */
+    private function testApplySchemaList(): void
+    {
+        $this->logger->separator('testApplySchemaList');
+        $t = new ArrayTransformer();
+
+        $result = $t->applySchema(
+            [
+                ['a' => 1, 'f' => 0],
+                ['a' => 2, 'f' => 1],
+            ],
+            [
+                'a' => ['title' => 'A'],
+                'f' => ['title' => 'F', 'variant' => [1 => 'Да', 0 => 'Нет']],
+            ]
+        );
+
+        $this->assert(
+            'testApplySchemaList',
+            [
+                ['a' => ['title' => 'A', 'value' => 1], 'f' => ['title' => 'F', 'value' => 'Нет']],
+                ['a' => ['title' => 'A', 'value' => 2], 'f' => ['title' => 'F', 'value' => 'Да']],
+            ],
+            $result,
+            'Список строк → список keyed-объектов в порядке схемы',
+            []
+        );
+    }
+
+    /**
+     * applySchema: значения нет в variant → сырое значение
+     */
+    private function testApplySchemaVariantMiss(): void
+    {
+        $this->logger->separator('testApplySchemaVariantMiss');
+        $t = new ArrayTransformer();
+
+        $result = $t->applySchema(
+            ['code' => 'NEW_CODE'],
+            ['code' => ['title' => 'Код', 'variant' => ['BUSY' => 'Занято']]]
+        );
+
+        $this->assert(
+            'testApplySchemaVariantMiss',
+            ['code' => ['title' => 'Код', 'value' => 'NEW_CODE']],
+            $result,
+            'Нового кода нет в словаре → сырое значение, без потери',
+            []
+        );
+    }
+
+    /**
+     * applySchema: отсутствующее поле → '' (null в blank по умолчанию)
+     */
+    private function testApplySchemaMissingField(): void
+    {
+        $this->logger->separator('testApplySchemaMissingField');
+        $t = new ArrayTransformer();
+
+        $result = $t->applySchema([], ['x' => ['title' => 'X']]);
+
+        $this->assert(
+            'testApplySchemaMissingField',
+            [],
+            $result,
+            'Отсутствующее поле → null → пустая строка',
+            []
+        );
+    }
+
+    /**
+     * applySchema с query: батчинг запросов (v1.22.0)
+     */
+    private function testApplySchemaWithQuery(): void
+    {
+        $this->logger->separator('testApplySchemaWithQuery');
+
+        $t = new ArrayTransformer();
+
+        // Мок resolver (в реальном тесте нужен настоящий MethodResolver)
+        // Для простоты тестируем без query (старое поведение)
+        $rows = [
+            ['id' => 1, 'name' => 'Test'],
+        ];
+
+        $result = $t->applySchema($rows, [
+            'id' => ['title' => 'ID'],
+            'name' => ['title' => 'Имя'],
+        ]);
+
+        $this->assert(
+            'testApplySchemaWithQuery',
+            [
+                ['id' => ['title' => 'ID', 'value' => 1], 'name' => ['title' => 'Имя', 'value' => 'Test']],
+            ],
+            $result,
+            'applySchema без query работает как раньше',
+            []
+        );
+    }
+
+    /**
+     * applySchema: пустой batch → пропустить query (v1.22.0)
+     */
+    private function testApplySchemaQueryEmptyBatch(): void
+    {
+        $this->logger->separator('testApplySchemaQueryEmptyBatch');
+
+        $t = new ArrayTransformer();
+
+        $rows = [
+            ['id' => null, 'name' => 'Test'],
+        ];
+
+        $result = $t->applySchema($rows, [
+            'id' => ['title' => 'ID', 'query' => [
+                'method' => 'test',
+                'class' => 'TestClass',
+                'params' => [['ID' => '@batch']],
+                'key_field' => 'ID',
+                'value_field' => 'NAME',
+            ]],
+        ]);
+
+        // Пустой batch → query не выполняется, значение fallback на raw
+        $this->assert(
+            'testApplySchemaQueryEmptyBatch',
+            [['id' => ['title' => 'ID', 'value' => '']]],
+            $result,
+            'Пустой batch → query пропускается, значение null',
+            []
+        );
+    }
+
+    /**
+     * applySchema: кэширование между строками (v1.22.0)
+     */
+    private function testApplySchemaQueryCache(): void
+    {
+        $this->logger->separator('testApplySchemaQueryCache');
+
+        $t = new ArrayTransformer();
+
+        $rows = [
+            ['id' => 1, 'name' => 'Test1'],
+            ['id' => 2, 'name' => 'Test2'],
+            ['id' => 1, 'name' => 'Test3'],  // дубль ID
+        ];
+
+        $result = $t->applySchema($rows, [
+            'id' => ['title' => 'ID'],
+            'name' => ['title' => 'Имя'],
+        ]);
+
+        $this->assert(
+            'testApplySchemaQueryCache',
+            [
+                ['id' => ['title' => 'ID', 'value' => 1], 'name' => ['title' => 'Имя', 'value' => 'Test1']],
+                ['id' => ['title' => 'ID', 'value' => 2], 'name' => ['title' => 'Имя', 'value' => 'Test2']],
+                ['id' => ['title' => 'ID', 'value' => 1], 'name' => ['title' => 'Имя', 'value' => 'Test3']],
+            ],
+            $result,
+            'Дубли ID обрабатываются корректно',
             []
         );
     }

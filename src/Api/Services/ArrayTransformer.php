@@ -2,11 +2,14 @@
 
 namespace Api\Services;
 
+use Api\Services\Actions\Context;
+use Api\Services\Actions\Resolver\Method;
+
 /**
  * Class ArrayTransformer
  * 
  * Трансформация списков объектов: перегруппировка, переименование полей,
- * декодирование JSON-строк внутри полей.
+ * декларативные трансформации через fn+args, query-запросы к внешним сервисам.
  * 
  * @package Api\Services
  */
@@ -14,11 +17,6 @@ class ArrayTransformer
 {
     /**
      * Превращает список объектов в список опций для select/select2.
-     * 
-     * Формат маппинга:
-     * - строка 'ИМЯ_ПОЛЯ' — копия поля
-     * - массив ['fn' => 'func' | ['Class','method'], 'args' => [...]] —
-     *   применить функцию/метод. В args доступно 'item:X' = $item[X].
      * 
      * @param array $items Исходный список
      * @param array $mapping Маппинг выходных полей
@@ -47,13 +45,6 @@ class ArrayTransformer
     /**
      * Собирает карту «ключ → значение» из списка (v1.20.0).
      * 
-     * Декларативный аналог JS:
-     * let map = {}; list.forEach(v => { map[v[keyField]] = v[valueField]; });
-     * 
-     * - строка без поля-ключа → пропускается;
-     * - дубли ключа → побеждает последний (как присваивание в JS);
-     * - нет поля-значения → null под этим ключом.
-     * 
      * @param array $items Исходный список
      * @param string $keyField Поле-ключ
      * @param string $valueField Поле-значение
@@ -78,6 +69,293 @@ class ArrayTransformer
         }
 
         return $map;
+    }
+
+    /**
+     * Применяет схему отображения к строке или списку строк (v1.21.0, v1.22.0).
+     * 
+     * Схема: упорядоченный маппинг dataKey => rule.
+     * rule может содержать:
+     * - title: заголовок поля
+     * - variant: словарь подмены raw → отображаемое
+     * - format: формат даты для strtotime+date
+     * - query: запрос к внешнему сервису (v1.22.0)
+     * 
+     * Выход: ассоциатив dataKey => ['title' => ..., 'value' => ...]
+     * (порядок = порядок схемы); для списка строк — список таких объектов.
+     * 
+     * @param array $rows Строка или список строк (авто-детект)
+     * @param array $schema Схема отображения
+     * @param array $options Опции: 'blank' => список значений-пустот
+     * @param Method|null $resolver Резолвер методов (для query, v1.22.0)
+     * @param Context|null $context Контекст (для логирования query)
+     * @return array
+     */
+    public function applySchema(
+        array $rows,
+        array $schema,
+        array $options = [],
+        ?Method $resolver = null,
+        ?Context $context = null
+    ): array {
+        $blank = array_key_exists('blank', $options) ? $options['blank'] : [null, ''];
+
+        // v1.22.0: если есть resolver, собираем query-кэш
+        $queryCache = [];
+        if ($resolver !== null && $context !== null) {
+            $queryCache = $this->buildQueryCache($rows, $schema, $resolver, $context);
+        }
+
+        if ($this->isListOfRows($rows)) {
+            $result = [];
+            foreach ($rows as $row) {
+                $result[] = $this->applySchemaRow($row, $schema, $blank, $queryCache, $context);
+            }
+            return $result;
+        }
+
+        return $this->applySchemaRow($rows, $schema, $blank, $queryCache, $context);
+    }
+
+    /**
+     * Строит кэш результатов query для всех полей схемы (v1.22.0).
+     * 
+     * Трёхфазная обработка:
+     * 1. Сбор уникальных значений для каждого query-поля
+     * 2. Выполнение query (один запрос на поле)
+     * 3. Построение lookup-таблиц: cache[field][raw] = value
+     * 
+     * @param array $rows Строки данных
+     * @param array $schema Схема
+     * @param Method $resolver Резолвер методов
+     * @param Context $context Контекст
+     * @return array Кэш: [fieldName => [rawValue => resultValue]]
+     */
+    private function buildQueryCache(
+        array $rows,
+        array $schema,
+        Method $resolver,
+        Context $context
+    ): array {
+        $cache = [];
+        $rowsList = $this->isListOfRows($rows) ? $rows : [$rows];
+
+        // Фаза 1: сбор уникальных значений для каждого query-поля
+        $collected = [];
+        foreach ($schema as $field => $rule) {
+            if (!is_array($rule) || !isset($rule['query'])) {
+                continue;
+            }
+
+            $collected[$field] = [];
+            foreach ($rowsList as $row) {
+                if (is_array($row) && isset($row[$field])) {
+                    $value = $row[$field];
+                    if ($value !== null && !in_array($value, $collected[$field], true)) {
+                        $collected[$field][] = $value;
+                    }
+                }
+            }
+        }
+
+        // Фаза 2: выполнение query
+        foreach ($collected as $field => $values) {
+            if (empty($values)) {
+                // Пустой batch → пропустить query
+                $cache[$field] = [];
+                continue;
+            }
+
+            $rule = $schema[$field];
+            $queryConfig = $rule['query'];
+            $onError = $queryConfig['on_error'] ?? 'raw';
+
+            try {
+                // Заменяем @batch в params
+                $params = $this->replaceBatchInParams($queryConfig['params'] ?? [], $values);
+
+                // Вызываем через Method Resolver синтетическим action.
+                // 'element' и 'on_error' НЕ прокидываем: element исказил бы
+                // список для lookup-таблицы, а on_error Method'а перехватил бы
+                // исключение мимо нашего catch.
+                $result = $resolver->execute([
+                    'method'    => $queryConfig['method'],
+                    'class'     => $queryConfig['class'],
+                    'params'    => $params,   // @batch уже заменён на список ID
+                    'construct' => $queryConfig['construct'] ?? null,
+                ]);
+
+                // Строим lookup-таблицу
+                $keyField = $queryConfig['key_field'] ?? 'ID';
+                $valueField = $queryConfig['value_field'] ?? null;
+
+                $lookup = [];
+                if (is_array($result)) {
+                    foreach ($result as $item) {
+                        if (is_array($item) && isset($item[$keyField])) {
+                            $key = $item[$keyField];
+
+                            if ($valueField !== null) {
+                                // value_field — массив: берём первый элемент
+                                if (is_array($valueField)) {
+                                    $firstField = reset($valueField);
+                                    $lookup[$key] = $item[$firstField] ?? null;
+                                } else {
+                                    $lookup[$key] = $item[$valueField] ?? null;
+                                }
+                            } else {
+                                // Без value_field: весь элемент
+                                $lookup[$key] = $item;
+                            }
+                        }
+                    }
+                }
+
+                $cache[$field] = $lookup;
+
+                $context->log('INFO', 'ArrayTransformer', "Query выполнен для поля {$field}", [
+                    'field' => $field,
+                    'batch_size' => count($values),
+                    'result_count' => count($lookup),
+                ]);
+            } catch (\Throwable $e) {
+                $context->log('ERROR', 'ArrayTransformer', "Query упал для поля {$field}", [
+                    'field' => $field,
+                    'error' => $e->getMessage(),
+                ]);
+
+                // Ошибка query → пустой кэш (fallback в applySchemaRow)
+                $cache[$field] = [];
+            }
+        }
+
+        return $cache;
+    }
+
+    /**
+     * Рекурсивно заменяет '@batch' в params на список значений (v1.22.0).
+     * 
+     * @param mixed $params Параметры (может быть вложенным массивом)
+     * @param array $values Список значений для замены
+     * @return mixed Параметры с заменённым @batch
+     */
+    private function replaceBatchInParams($params, array $values)
+    {
+        if ($params === '@batch') {
+            return $values;
+        }
+
+        if (is_array($params)) {
+            $result = [];
+            foreach ($params as $key => $value) {
+                $result[$key] = $this->replaceBatchInParams($value, $values);
+            }
+            return $result;
+        }
+
+        return $params;
+    }
+
+    /**
+     * Список строк: все элементы первого уровня — массивы
+     * (пустой массив считаем пустым списком).
+     * 
+     * @param array $rows Вход
+     * @return bool
+     */
+    private function isListOfRows(array $rows): bool
+    {
+        if ($rows === []) {
+            return true;
+        }
+
+        foreach ($rows as $element) {
+            if (!is_array($element)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Применяет схему к одной строке (v1.21.0, v1.22.0).
+     * 
+     * @param array $row Строка данных
+     * @param array $schema Схема
+     * @param array $blank Список значений-пустот
+     * @param array $queryCache Кэш результатов query
+     * @param Context|null $context Контекст для логирования
+     * @return array keyed-форма {field: {title, value}}
+     */
+    private function applySchemaRow(
+        array $row,
+        array $schema,
+        array $blank,
+        array $queryCache = [],
+        ?Context $context = null
+    ): array {
+        $out = [];
+
+        foreach ($schema as $key => $rule) {
+            $title = is_array($rule) ? ($rule['title'] ?? (string) $key) : (string) $rule;
+            $variant = is_array($rule) ? ($rule['variant'] ?? null) : null;
+            $format = is_array($rule) ? ($rule['format'] ?? null) : null;
+            $query = is_array($rule) ? ($rule['query'] ?? null) : null;
+
+            $raw = $row[$key] ?? null;
+
+            // Query-поле (v1.22.0)
+            if ($query !== null && !empty($queryCache[$key])) {
+                if (array_key_exists($raw, $queryCache[$key])) {
+                    $value = $queryCache[$key][$raw];
+                } else {
+                    // Значения нет в кэше → fallback
+                    $onError = $query['on_error'] ?? 'raw';
+                    if ($onError === 'raw') {
+                        $value = $raw;
+                        if ($context) {
+                            $context->log('WARNING', 'ArrayTransformer', "Query: значение не найдено в кэше для поля {$key}", [
+                                'field' => $key,
+                                'raw' => $raw,
+                            ]);
+                        }
+                    } else {
+                        $value = null;
+                        if ($context) {
+                            $context->log('ERROR', 'ArrayTransformer', "Query: значение не найдено в кэше для поля {$key}", [
+                                'field' => $key,
+                                'raw' => $raw,
+                            ]);
+                        }
+                    }
+                }
+            }
+            // Обычные правила (variant/format/blank)
+            elseif (in_array($raw, $blank, true)) {
+                $value = '';
+            } elseif (
+                is_array($variant)
+                && (is_int($raw) || is_string($raw))
+                && array_key_exists($raw, $variant)
+            ) {
+                $value = $variant[$raw];
+            } elseif (!empty($format)) {
+                $value = date($format, strtotime($raw));
+            } else {
+                $value = $raw;
+            }
+
+            // Убираем служебные ключи из rule
+            if (is_array($rule)) {
+                unset($rule['title'], $rule['variant'], $rule['format'], $rule['query']);
+                $out[$key] = array_merge($rule, ['title' => $title, 'value' => $value]);
+            } else {
+                $out[$key] = ['title' => $title, 'value' => $value];
+            }
+        }
+
+        return $out;
     }
 
     /**
@@ -118,10 +396,6 @@ class ArrayTransformer
     /**
      * Резолвит аргументы для одной итерации.
      * 
-     * - 'item:X' → $item[X]
-     * - массив с fn+args → рекурсивно (для вложенных трансформаций)
-     * - остальное — как есть (литералы)
-     * 
      * @param array $args Массив аргументов
      * @param array $item Текущая строка
      * @return array Разрешённые аргументы
@@ -131,7 +405,6 @@ class ArrayTransformer
         $resolved = [];
         foreach ($args as $arg) {
             // item:X — доступ к полю текущей строки (v1.11.0)
-            // Не путать с result:X — это DSL-семантика "из lastResult"
             if (is_string($arg) && strpos($arg, 'item:') === 0) {
                 $key = substr($arg, 5);
                 $resolved[] = $item[$key] ?? null;
@@ -150,12 +423,6 @@ class ArrayTransformer
 
     /**
      * Резолвит строковый шаблон с {{item:X}} по текущей строке (v1.18.2).
-     * 
-     * Семантика:
-     * - {{item:PATH}} → значение по пути (поддержка точечной нотации item:A.B);
-     * - null → '' (Twig-семантика);
-     * - итог trim'ится, чтобы убрать хвостовые пробелы от null-полей
-     *   (например 'LAST_NAME NAME ' без отчества → 'LAST_NAME NAME').
      * 
      * @param string $template Шаблон с плейсхолдерами
      * @param array $item Текущая строка
@@ -216,11 +483,6 @@ class ArrayTransformer
     /**
      * Применяет инструкции изменения полей лида (v1.14.0).
      * 
-     * Типы инструкций (значения декодированного UF_JSON_MAPPING_FIELDS):
-     * - 'FIELD++'  — инкремент: (int) current[FIELD] + 1;
-     * - 'field:x'  — значение из массива values (значения контекста);
-     * - литерал    — как есть ('1', 'строка').
-     * 
      * @param array|null $instructions Декодированный маппинг {поле => инструкция}
      * @param array $current Текущие значения лида (для ++)
      * @param array $values Значения для инструкций field:*
@@ -246,7 +508,9 @@ class ArrayTransformer
             // Значение из контекста: "field:next_action_at"
             if (strpos($instruction, 'field:') === 0) {
                 $key = substr($instruction, strlen('field:'));
-                $update[$field] = $values[$key] ?? null;
+                if (!empty($values[$key])) {
+                    $update[$field] = $values[$key] ?? null;
+                }
                 continue;
             }
 
@@ -259,7 +523,6 @@ class ArrayTransformer
 
     /**
      * Переименовывает ключи у каждого объекта в списке.
-     * Удобно, когда нужно просто алиасы: ['old' => 'new'].
      * 
      * @param array $items Исходный список
      * @param array $aliases Маппинг старых ключей на новые

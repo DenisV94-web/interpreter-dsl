@@ -118,6 +118,20 @@ class Method
             'resolved_params' => $resolvedParams
         ]);
 
+        // v1.22.0: ArrayTransformer::applySchema нужны Method-резолвер и Context
+        // для выполнения query-правил — докидываем их в хвост params.
+        // Паддим слот options, чтобы объекты легли в аргументы 4-5, а не в 3-й.
+        if (
+            $className === \Api\Services\ArrayTransformer::class
+            && $methodName === 'applySchema'
+        ) {
+            if (count($resolvedParams) < 3) {
+                $resolvedParams = array_pad($resolvedParams, 3, []);
+            }
+            $resolvedParams[] = $this;
+            $resolvedParams[] = $this->context;
+        }
+
         // Выполняем вызов с поддержкой on_error.
         // При исключении без on_error бросаем ExecutionException с errorContext
         // (class, method, resolved_params) — он попадает в лог.
