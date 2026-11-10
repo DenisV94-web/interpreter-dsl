@@ -544,4 +544,145 @@ class ArrayTransformer
         }
         return $result;
     }
+
+    // ========================================================
+    // PROJECTTREE — ПРОЕКЦИЯ (SELECT) ПОЛЕЙ ДЕРЕВА (v1.24.0)
+    // ========================================================
+
+    /**
+     * Проекция полей многомерной коллекции: оставляет только указанные
+     * поля на каждом уровне дерева (v1.24.0).
+     * 
+     * Спека — карта путь => select:
+     * - '' (пустая строка) — проекция строк корневой коллекции;
+     * - 'department' — проекция assoc-объекта внутри каждой строки корня;
+     * - 'users' — проекция каждой строки списка внутри строки корня;
+     * - 'users.tags' — точечные пути любой глубины.
+     * 
+     * Формы select:
+     * - список: ['ID', 'NAME'] — отсутствующее поле → null;
+     * - маппинг: ['ID' => null, 'NAME' => 'Аноним'] — значение = дефолт
+     *   при ОТСУТСТВИИ ключа (ключ с null остаётся null);
+     * - смешанная: ['ID', 'NAME' => 'Аноним'].
+     * Порядок полей выхода = порядок select.
+     * 
+     * Правила обхода:
+     * - путь → assoc-массив: проецируется как строка;
+     * - путь → список: проецируется каждая строка, ключи списка сохраняются;
+     * - путь → скаляр или отсутствует: не трогается;
+     * - уровни применяются по возрастанию глубины (сначала '' , потом
+     *   'users', потом 'users.tags'): вложенный путь должен пережить
+     *   select родительского уровня.
+     * 
+     * @param array $source Исходная коллекция (карта или список)
+     * @param array $spec Спецификация проекции
+     * @return array Коллекция после проекции
+     */
+    public function projectTree(array $source, array $spec): array
+    {
+        $levels = [];
+        foreach ($spec as $path => $select) {
+            $path = (string) $path;
+            $levels[] = [
+                'segments' => $path === '' ? [] : explode('.', $path),
+                'select'   => $this->normalizeSelect($select),
+            ];
+        }
+
+        // Мелкие пути первыми; PHP 8 usort стабилен — порядок равных = порядок конфига
+        usort($levels, static fn(array $a, array $b): int => count($a['segments']) <=> count($b['segments']));
+
+        $result = $source;
+        foreach ($levels as $level) {
+            if (empty($level['segments'])) {
+                $out = [];
+                foreach ($result as $key => $row) {
+                    $out[$key] = is_array($row) ? $this->projectRow($row, $level['select']) : $row;
+                }
+                $result = $out;
+                continue;
+            }
+            $result = $this->projectAtPath($result, $level['segments'], $level['select']);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Спускается по пути и проецирует найденные коллекции/объекты.
+     * 
+     * @param array $collection Коллекция-владелец
+     * @param array $segments Сегменты пути
+     * @param array $select Нормализованный select
+     * @return array
+     */
+    private function projectAtPath(array $collection, array $segments, array $select): array
+    {
+        $head = array_shift($segments);
+        $out = [];
+
+        foreach ($collection as $key => $item) {
+            if (!is_array($item) || !isset($item[$head]) || !is_array($item[$head])) {
+                // скаляр или отсутствие пути — не трогаем
+                $out[$key] = $item;
+                continue;
+            }
+
+            if (empty($segments)) {
+                $target = $item[$head];
+                if (array_is_list($target)) {
+                    $projected = [];
+                    foreach ($target as $rowKey => $row) {
+                        $projected[$rowKey] = is_array($row) ? $this->projectRow($row, $select) : $row;
+                    }
+                    $item[$head] = $projected;
+                } else {
+                    $item[$head] = $this->projectRow($target, $select);
+                }
+            } else {
+                $item[$head] = $this->projectAtPath($item[$head], $segments, $select);
+            }
+
+            $out[$key] = $item;
+        }
+
+        return $out;
+    }
+
+    /**
+     * Проецирует одну строку: оставляет поля select в порядке спеки.
+     * Дефолт подставляется ТОЛЬКО при отсутствии ключа.
+     * 
+     * @param array $row Строка
+     * @param array $select Нормализованный select: field => default
+     * @return array
+     */
+    private function projectRow(array $row, array $select): array
+    {
+        $out = [];
+        foreach ($select as $field => $default) {
+            $out[$field] = array_key_exists($field, $row) ? $row[$field] : $default;
+        }
+        return $out;
+    }
+
+    /**
+     * Нормализует select к виду field => default:
+     * списочная форма ('ID') → default null; маппинг ('ID' => x) → default x.
+     * 
+     * @param mixed $select Спека select
+     * @return array
+     */
+    private function normalizeSelect($select): array
+    {
+        $normalized = [];
+        foreach ((array) $select as $key => $value) {
+            if (is_int($key)) {
+                $normalized[(string) $value] = null;
+            } else {
+                $normalized[$key] = $value;
+            }
+        }
+        return $normalized;
+    }
 }

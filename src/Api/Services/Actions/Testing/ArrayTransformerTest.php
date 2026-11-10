@@ -3,6 +3,7 @@
 namespace Api\Services\Actions\Testing;
 
 use Api\Services\ArrayTransformer;
+use Api\Services\ArrayFilter;
 
 /**
  * Class ArrayTransformerTest
@@ -10,7 +11,7 @@ use Api\Services\ArrayTransformer;
  * Тесты сервиса ArrayTransformer: перегруппировка списков,
  * переименование полей, декларативные трансформации через fn+args.
  * 
- * Всего тестов: 11
+ * Всего тестов: 26
  * 
  * @package Api\Services\Actions\Testing
  */
@@ -57,6 +58,14 @@ class ArrayTransformerTest
         $this->testApplySchemaWithQuery();
         $this->testApplySchemaQueryEmptyBatch();
         $this->testApplySchemaQueryCache();
+
+        // projectTree (v1.24.0)
+        $this->testProjectTreeObject();
+        $this->testProjectTreeList();
+        $this->testProjectTreeRootRow();
+        $this->testProjectTreeMissingDefaults();
+        $this->testProjectTreeScalarPathIgnored();
+        $this->testProjectTreeAfterFilterTree();
 
         $this->logger->summary($this->passed, $this->failed);
 
@@ -662,6 +671,192 @@ class ArrayTransformerTest
             ],
             $result,
             'Дубли ID обрабатываются корректно',
+            []
+        );
+    }
+
+    /**
+     * Фикстура проекции: карта подразделений
+     */
+    private function projectFixture(): array
+    {
+        return [
+            '451' => [
+                'department' => [
+                    'ID' => '451',
+                    'NAME' => 'Changan Адыгея',
+                    'UF_TELEPHONY' => '2565',
+                    'editPlan' => true,
+                    'JUNK' => 'x',
+                ],
+                'users' => [
+                    ['ID' => '1', 'LAST_NAME' => 'Верещагин', 'NAME' => 'Денис', 'SECOND_NAME' => null, 'PERSONAL_PAGER' => '288'],
+                    ['ID' => '2', 'LAST_NAME' => 'Брикалов', 'NAME' => 'Алексей'],
+                ],
+                'comment' => 'текст',
+            ],
+            '742' => [
+                'department' => [
+                    'ID' => '742',
+                    'NAME' => 'EXEED Тюмень',
+                    'UF_TELEPHONY' => '2566',
+                    'editPlan' => true,
+                    'JUNK' => 'y',
+                ],
+                'users' => [],
+                'comment' => '',
+            ],
+        ];
+    }
+
+    private function testProjectTreeObject(): void
+    {
+        $this->logger->separator('testProjectTreeObject');
+        $t = new ArrayTransformer();
+
+        $result = $t->projectTree($this->projectFixture(), [
+            'department' => ['ID', 'NAME', 'UF_TELEPHONY', 'editPlan'],
+        ]);
+
+        $this->assert(
+            'testProjectTreeObject',
+            ['ID' => '451', 'NAME' => 'Changan Адыгея', 'UF_TELEPHONY' => '2565', 'editPlan' => true],
+            $result['451']['department'],
+            'assoc-объект проецируется: JUNK отсечён, порядок = select',
+            []
+        );
+    }
+
+    private function testProjectTreeList(): void
+    {
+        $this->logger->separator('testProjectTreeList');
+        $t = new ArrayTransformer();
+
+        $result = $t->projectTree($this->projectFixture(), [
+            'users' => ['ID', 'LAST_NAME'],
+        ]);
+
+        $this->assert(
+            'testProjectTreeList',
+            [
+                ['ID' => '1', 'LAST_NAME' => 'Верещагин'],
+                ['ID' => '2', 'LAST_NAME' => 'Брикалов'],
+            ],
+            $result['451']['users'],
+            'Список проецируется построчно, ключи списка сохранены',
+            []
+        );
+    }
+
+    private function testProjectTreeRootRow(): void
+    {
+        $this->logger->separator('testProjectTreeRootRow');
+        $t = new ArrayTransformer();
+
+        $result = $t->projectTree($this->projectFixture(), [
+            '' => ['department', 'users'],
+        ]);
+
+        $this->assert(
+            'testProjectTreeRootRow',
+            ['department', 'users'],
+            array_keys($result['451']),
+            "Путь '': строка корня оставляет только department и users (comment отсечён)",
+            []
+        );
+    }
+
+    private function testProjectTreeMissingDefaults(): void
+    {
+        $this->logger->separator('testProjectTreeMissingDefaults');
+        $t = new ArrayTransformer();
+
+        $result = $t->projectTree($this->projectFixture(), [
+            'users' => ['ID', 'WORK_POSITION', 'SECOND_NAME' => 'DEF', 'PERSONAL_PAGER' => '—'],
+        ]);
+
+        $this->assert(
+            'testProjectTreeMissingDefaults_NullStays',
+            null,
+            $result['451']['users'][0]['SECOND_NAME'],
+            'Ключ есть со значением null → остаётся null, дефолт не подставляется',
+            []
+        );
+
+        $this->assert(
+            'testProjectTreeMissingDefaults_DefaultApplied',
+            'DEF',
+            $result['451']['users'][1]['SECOND_NAME'],
+            'Ключа нет → подставляется дефолт из маппинг-формы',
+            []
+        );
+
+        // array_key_exists + === null: оператор ?? не отличает null от отсутствия ключа
+        $this->assert(
+            'testProjectTreeMissingDefaults_ListFormNull',
+            true,
+            array_key_exists('WORK_POSITION', $result['451']['users'][1])
+                && $result['451']['users'][1]['WORK_POSITION'] === null,
+            'Списочная форма без дефолта: нет поля → ключ присутствует со значением null',
+            []
+        );
+
+        $this->assert(
+            'testProjectTreeMissingDefaults_Pager',
+            '—',
+            $result['451']['users'][1]['PERSONAL_PAGER'],
+            'Списочная форма с дефолтом: нет PAGER → "—"',
+            []
+        );
+    }
+
+    private function testProjectTreeScalarPathIgnored(): void
+    {
+        $this->logger->separator('testProjectTreeScalarPathIgnored');
+        $t = new ArrayTransformer();
+
+        $result = $t->projectTree($this->projectFixture(), [
+            'comment' => ['ID'],
+        ]);
+
+        $this->assert(
+            'testProjectTreeScalarPathIgnored',
+            'текст',
+            $result['451']['comment'],
+            'Путь в скаляр игнорируется: comment остался как есть',
+            []
+        );
+    }
+
+    private function testProjectTreeAfterFilterTree(): void
+    {
+        $this->logger->separator('testProjectTreeAfterFilterTree');
+        $t = new ArrayTransformer();
+        $f = new ArrayFilter();
+
+        $filtered = $f->filterTree($this->projectFixture(), [
+            '' => ['filter' => ['department.UF_TELEPHONY' => '2565'], 'keep_keys' => true],
+        ]);
+
+        $result = $t->projectTree($filtered, [
+            ''           => ['department', 'users'],
+            'department' => ['ID', 'NAME'],
+            'users'      => ['ID', 'LAST_NAME'],
+        ]);
+
+        $this->assert(
+            'testProjectTreeAfterFilterTree',
+            [
+                '451' => [
+                    'department' => ['ID' => '451', 'NAME' => 'Changan Адыгея'],
+                    'users' => [
+                        ['ID' => '1', 'LAST_NAME' => 'Верещагин'],
+                        ['ID' => '2', 'LAST_NAME' => 'Брикалов'],
+                    ],
+                ],
+            ],
+            $result,
+            'Связка filterTree → projectTree: строки отфильтрованы, поля спроецированы',
             []
         );
     }
