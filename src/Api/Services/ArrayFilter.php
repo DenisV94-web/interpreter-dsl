@@ -160,4 +160,285 @@ class ArrayFilter
                 return false;
         }
     }
+
+    // ========================================================
+    // FILTERTREE — МНОГОМЕРНАЯ ФИЛЬТРАЦИЯ (v1.23.0)
+    // ========================================================
+
+    /**
+     * Фильтрует многомерную коллекцию по спецификации уровней (v1.23.0).
+     * 
+     * Спека — карта путь => опции уровня:
+     * - '' (пустая строка) — корневая коллекция;
+     * - 'users', 'users.tags' — точечный путь до дочерней коллекции
+     *   от элемента корня.
+     * 
+     * Опции уровня:
+     * - 'filter' — условия грамматикой Condition (logic AND/OR, вложенные
+     *   группы, Bitrix-операторы в ключах); скоуп — элемент коллекции;
+     *   '_key' — псевдополе: ключ элемента в его коллекции;
+     * - 'keep_keys' — сохранить ключи отфильтрованной коллекции
+     *   (дефолт false → reindex в список);
+     * - 'drop_empty' — удалить владельца коллекции, ставшей пустой
+     *   после фильтра (дефолт false); каскада между уровнями нет.
+     * 
+     * Уровни применяются по возрастанию глубины пути (корень первым);
+     * порядок одноуровневых путей = порядок конфига.
+     * Правая часть условий резолвится ДО вызова (resolveParams),
+     * т.е. 'field:x' справа = значение из контекста.
+     * Нет поля у элемента → условие false → строка исключается
+     * (семантика ArrayFilter).
+     * 
+     * @param array $source Исходная коллекция (карта или список)
+     * @param array $spec Спецификация уровней
+     * @return array Отфильтрованная коллекция
+     */
+    public function filterTree(array $source, array $spec): array
+    {
+        $levels = [];
+        foreach ($spec as $path => $level) {
+            $path = (string) $path;
+            $levels[] = [
+                'segments' => $path === '' ? [] : explode('.', $path),
+                'level'    => is_array($level) ? $level : [],
+            ];
+        }
+
+        // Корень первым; PHP 8 usort стабилен — порядок равных глубин = порядок конфига
+        usort($levels, static fn(array $a, array $b): int => count($a['segments']) <=> count($b['segments']));
+
+        $result = $source;
+        foreach ($levels as $entry) {
+            if (empty($entry['segments'])) {
+                $result = $this->treeFilterCollection($result, $entry['level']);
+                continue;
+            }
+            $result = $this->treeFilterAtPath($result, $entry['segments'], $entry['level']);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Фильтрует одну коллекцию по условиям уровня.
+     * 
+     * @param array $items Коллекция строк
+     * @param array $level Опции уровня
+     * @return array Отфильтрованная коллекция
+     */
+    private function treeFilterCollection(array $items, array $level): array
+    {
+        $filter = $level['filter'] ?? [];
+        $out = [];
+
+        foreach ($items as $key => $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            if ($this->treeMatchesGroup($row, $filter, $key)) {
+                $out[$key] = $row;
+            }
+        }
+
+        return ($level['keep_keys'] ?? false) ? $out : array_values($out);
+    }
+
+    /**
+     * Спускается по пути и фильтрует дочерние коллекции внутри элементов.
+     * 
+     * @param array $collection Коллекция-владелец
+     * @param array $segments Оставшиеся сегменты пути
+     * @param array $level Опции уровня
+     * @return array Коллекция-владелец после обработки
+     */
+    private function treeFilterAtPath(array $collection, array $segments, array $level): array
+    {
+        $head = array_shift($segments);
+        $out = [];
+
+        foreach ($collection as $key => $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+
+            // Нет дочерней коллекции: drop_empty убирает владельца, иначе не трогаем
+            if (!isset($item[$head]) || !is_array($item[$head])) {
+                if (!empty($level['drop_empty'])) {
+                    continue;
+                }
+                $out[$key] = $item;
+                continue;
+            }
+
+            if (empty($segments)) {
+                // Последний сегмент: фильтруем саму дочернюю коллекцию
+                $filtered = $this->treeFilterCollection($item[$head], $level);
+                if (count($filtered) === 0 && !empty($level['drop_empty'])) {
+                    continue;
+                }
+                $item[$head] = $filtered;
+                $out[$key] = $item;
+                continue;
+            }
+
+            // Промежуточный сегмент: рекурсия вглубь
+            $newSub = $this->treeFilterAtPath($item[$head], $segments, $level);
+            if (count($newSub) === 0 && !empty($level['drop_empty'])) {
+                continue;
+            }
+            $item[$head] = $newSub;
+            $out[$key] = $item;
+        }
+
+        return $out;
+    }
+
+    /**
+     * Группа условий (грамматика Condition, скоуп — элемент):
+     * 'logic' => 'AND'|'OR', строковые ключи — условия,
+     * числовые ключи с массивами — вложенные группы.
+     * 
+     * @param array $row Элемент коллекции
+     * @param array $group Группа условий
+     * @param mixed $rowKey Ключ элемента в его коллекции (для '_key')
+     * @return bool
+     */
+    private function treeMatchesGroup(array $row, array $group, $rowKey): bool
+    {
+        if (empty($group)) {
+            return true;
+        }
+
+        $logic = (isset($group['logic']) && strtoupper((string) $group['logic']) === 'OR')
+            ? 'OR'
+            : 'AND';
+
+        $results = [];
+        foreach ($group as $key => $condition) {
+            if ($key === 'logic') {
+                continue;
+            }
+
+            if (is_int($key) && is_array($condition)) {
+                $results[] = $this->treeMatchesGroup($row, $condition, $rowKey);
+                continue;
+            }
+
+            if (is_string($key)) {
+                $results[] = $this->treeMatchCondition($row, $key, $condition, $rowKey);
+                continue;
+            }
+
+            // Мусор в конфиге (числовой ключ, не массив) — не влияем
+            $results[] = true;
+        }
+
+        if (empty($results)) {
+            return true;
+        }
+
+        return $logic === 'OR'
+            ? in_array(true, $results, true)
+            : !in_array(false, $results, true);
+    }
+
+    /**
+     * Одно условие: оператор-Bitrix в ключе + точечный путь или '_key'.
+     * 
+     * @param array $row Элемент
+     * @param string $key Ключ условия с оператором
+     * @param mixed $expected Ожидаемое значение (уже зарезолвлено)
+     * @param mixed $rowKey Ключ элемента
+     * @return bool
+     */
+    private function treeMatchCondition(array $row, string $key, $expected, $rowKey): bool
+    {
+        $operator = '=';
+        $path = $key;
+
+        // Двухсимвольные раньше однсимвольных; '!' после '!@' и '!='
+        foreach (['!@', '<=', '>=', '!=', '@', '!', '<', '>', '%'] as $op) {
+            if (strncmp($key, $op, strlen($op)) === 0) {
+                $operator = $op;
+                $path = substr($key, strlen($op));
+                break;
+            }
+        }
+
+        if ($path === '_key') {
+            $actual = $rowKey;
+        } else {
+            [$found, $actual] = $this->treeGetValue($row, $path);
+            if (!$found) {
+                return false;   // нет поля → строка исключается
+            }
+        }
+
+        switch ($operator) {
+            case '@':
+                return $this->treeIn($actual, $expected);
+            case '!@':
+                return !$this->treeIn($actual, $expected);
+            case '%':
+                return is_scalar($actual) && is_scalar($expected)
+                    && mb_stripos((string) $actual, (string) $expected) !== false;
+            case '<=':
+                return $actual <= $expected;
+            case '>=':
+                return $actual >= $expected;
+            case '<':
+                return $actual < $expected;
+            case '>':
+                return $actual > $expected;
+            case '!=':
+            case '!':
+                return $actual != $expected;
+            default:
+                return $actual == $expected;
+        }
+    }
+
+    /**
+     * IN с учётом мульти-полей: если значение элемента — массив,
+     * достаточно пересечения с одним элементом списка (как в Битрикс).
+     * Сравнение нестрогое ('451' попадает в [451]).
+     * 
+     * @param mixed $actual Значение поля
+     * @param mixed $expected Скаляр или список
+     * @return bool
+     */
+    private function treeIn($actual, $expected): bool
+    {
+        $expectedList = is_array($expected) ? $expected : [$expected];
+
+        if (is_array($actual)) {
+            foreach ($actual as $value) {
+                if (in_array($value, $expectedList, false)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        return in_array($actual, $expectedList, false);
+    }
+
+    /**
+     * Значение по точечному пути из элемента.
+     * 
+     * @param array $row Элемент
+     * @param string $path Точечный путь
+     * @return array [найдено, значение]
+     */
+    private function treeGetValue(array $row, string $path): array
+    {
+        $current = $row;
+        foreach (explode('.', $path) as $segment) {
+            if (!is_array($current) || !array_key_exists($segment, $current)) {
+                return [false, null];
+            }
+            $current = $current[$segment];
+        }
+        return [true, $current];
+    }
 }

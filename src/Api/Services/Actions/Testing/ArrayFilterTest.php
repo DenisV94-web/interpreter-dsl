@@ -12,7 +12,7 @@ use Api\Services\ArrayFilter;
  * 
  * Лог: ArrayFilter_YYYY-MM-DD_HH-II-SS.log
  * 
- * Всего тестов: 9
+ * Всего тестов: 23
  * 
  * @package Api\Services\Actions\Testing
  */
@@ -67,6 +67,16 @@ class ArrayFilterTest
         $this->testMissingField();
         $this->testEmptyFilter();
         $this->testRealCasePrimaryResults();
+
+        // filterTree (v1.23.0)
+        $this->testFilterTreeRootKeepKeys();
+        $this->testFilterTreeRootOrLogic();
+        $this->testFilterTreeNestedInAndReindex();
+        $this->testFilterTreeRootReindex();
+        $this->testFilterTreeDropEmpty();
+        $this->testFilterTreeMissingField();
+        $this->testFilterTreeKeyPseudoField();
+        $this->testFilterTreeNestedGroups();
 
         $this->logger->summary($this->passed, $this->failed);
 
@@ -334,6 +344,204 @@ class ArrayFilterTest
             array_column($result, 'ID'),
             'Реальный кейс: слабое сравнение строк и чисел, все условия AND',
             ['filter' => ['!UF_CHECK_DEPARTMENT' => 1, 'UF_REASON_REFUSAL' => 0, 'UF_LEAD_STATUS' => 'UC_MTFIW2']]
+        );
+    }
+
+    /**
+     * Фикстура: карта подразделений с пользователями
+     */
+    private function treeFixture(): array
+    {
+        return [
+            '451' => [
+                'dept' => ['PHONE' => '2565', 'CRM' => '11823'],
+                'users' => [
+                    ['ID' => 1, 'DEPS' => [451, 790]],
+                    ['ID' => 2, 'DEPS' => [790]],
+                ],
+            ],
+            '742' => [
+                'dept' => ['PHONE' => '2566'],
+                'users' => [
+                    ['ID' => 3, 'DEPS' => [742]],
+                ],
+            ],
+            '788' => [
+                'dept' => ['PHONE' => '2566'],
+                'users' => [],
+            ],
+        ];
+    }
+
+    private function testFilterTreeRootKeepKeys(): void
+    {
+        $this->logger->separator('testFilterTreeRootKeepKeys');
+        $f = new ArrayFilter();
+
+        $result = $f->filterTree($this->treeFixture(), [
+            '' => ['filter' => ['dept.PHONE' => '2566'], 'keep_keys' => true],
+        ]);
+
+        $this->assert(
+            'testFilterTreeRootKeepKeys',
+            [742, 788],
+            array_keys($result),
+            'Корень: keep_keys=true сохраняет ключи карты (числовые ключи — int по нормализации PHP)',
+            []
+        );
+    }
+
+    private function testFilterTreeRootOrLogic(): void
+    {
+        $this->logger->separator('testFilterTreeRootOrLogic');
+        $f = new ArrayFilter();
+
+        $result = $f->filterTree($this->treeFixture(), [
+            '' => [
+                'filter' => ['logic' => 'OR', 'dept.PHONE' => '2565', '_key' => '742'],
+                'keep_keys' => true,
+            ],
+        ]);
+
+        $this->assert(
+            'testFilterTreeRootOrLogic',
+            [451, 742],
+            array_keys($result),
+            'logic OR: телефон 2565 ИЛИ ключ 742',
+            []
+        );
+    }
+
+    private function testFilterTreeNestedInAndReindex(): void
+    {
+        $this->logger->separator('testFilterTreeNestedInAndReindex');
+        $f = new ArrayFilter();
+
+        $result = $f->filterTree($this->treeFixture(), [
+            '' => ['keep_keys' => true],
+            'users' => ['filter' => ['@DEPS' => [451]]],
+        ]);
+
+        $this->assert(
+            'testFilterTreeNestedIn_MultiField',
+            [1],
+            array_column($result['451']['users'], 'ID'),
+            '@DEPS по массиву: пересечение [451,790] с [451] оставляет юзера 1',
+            []
+        );
+
+        $this->assert(
+            'testFilterTreeNestedIn_Reindex',
+            [0],
+            array_keys($result['451']['users']),
+            'keep_keys=false на уровне users → reindex в список',
+            []
+        );
+
+        $this->assert(
+            'testFilterTreeNestedIn_EmptyKept',
+            [],
+            $result['742']['users'],
+            'drop_empty не задан: владелец с пустыми users остаётся',
+            []
+        );
+    }
+
+    private function testFilterTreeRootReindex(): void
+    {
+        $this->logger->separator('testFilterTreeRootReindex');
+        $f = new ArrayFilter();
+
+        $result = $f->filterTree($this->treeFixture(), [
+            '' => ['filter' => ['dept.PHONE' => '2566']],
+        ]);
+
+        $this->assert(
+            'testFilterTreeRootReindex',
+            [0, 1],
+            array_keys($result),
+            'Корень без keep_keys → список с нулевыми индексами',
+            []
+        );
+    }
+
+    private function testFilterTreeDropEmpty(): void
+    {
+        $this->logger->separator('testFilterTreeDropEmpty');
+        $f = new ArrayFilter();
+
+        $result = $f->filterTree($this->treeFixture(), [
+            '' => ['keep_keys' => true],
+            'users' => ['filter' => ['@DEPS' => [451]], 'drop_empty' => true],
+        ]);
+
+        $this->assert(
+            'testFilterTreeDropEmpty',
+            [451],
+            array_keys($result),
+            'drop_empty=true: 742 (опустел) и 788 (был пуст) удалены',
+            []
+        );
+    }
+
+    private function testFilterTreeMissingField(): void
+    {
+        $this->logger->separator('testFilterTreeMissingField');
+        $f = new ArrayFilter();
+
+        $result = $f->filterTree($this->treeFixture(), [
+            '' => ['filter' => ['dept.MISSING' => 'x'], 'keep_keys' => true],
+        ]);
+
+        $this->assert(
+            'testFilterTreeMissingField',
+            [],
+            $result,
+            'Нет поля → условие false → строка исключена (семантика ArrayFilter)',
+            []
+        );
+    }
+
+    private function testFilterTreeKeyPseudoField(): void
+    {
+        $this->logger->separator('testFilterTreeKeyPseudoField');
+        $f = new ArrayFilter();
+
+        $result = $f->filterTree($this->treeFixture(), [
+            '' => ['filter' => ['@_key' => ['451', '742']], 'keep_keys' => true],
+        ]);
+
+        $this->assert(
+            'testFilterTreeKeyPseudoField',
+            [451, 742],
+            array_keys($result),
+            '@_key — IN по ключам карты (нестрогое сравнение строк и чисел)',
+            []
+        );
+    }
+
+    private function testFilterTreeNestedGroups(): void
+    {
+        $this->logger->separator('testFilterTreeNestedGroups');
+        $f = new ArrayFilter();
+
+        $result = $f->filterTree($this->treeFixture(), [
+            '' => [
+                'filter' => [
+                    'logic' => 'OR',
+                    ['logic' => 'AND', 'dept.PHONE' => '2565', 'dept.CRM' => '11823'],
+                    ['_key' => '788'],
+                ],
+                'keep_keys' => true,
+            ],
+        ]);
+
+        $this->assert(
+            'testFilterTreeNestedGroups',
+            [451, 788],
+            array_keys($result),
+            'Вложенные группы: (AND-группа) OR (ключ 788)',
+            []
         );
     }
 
