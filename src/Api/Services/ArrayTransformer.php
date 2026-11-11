@@ -685,4 +685,135 @@ class ArrayTransformer
         }
         return $normalized;
     }
+
+    // ========================================================
+    // FILLEMPTY — ЗАМЕНА ПУСТЫХ ЗНАЧЕНИЙ (v1.25.0)
+    // ========================================================
+
+    /**
+     * Заменяет пустые значения указанных полей в строках дерева (v1.25.0).
+     * 
+     * В отличие от projectTree НЕ проецирует поля: строка сохраняется
+     * целиком, подменяются только значения указанных полей, если они пусты.
+     * 
+     * Спека — путь => маппинг поле => замена:
+     * - '' — поля строк корневой коллекции;
+     * - 'users' — поля каждой строки списка (или assoc-объекта) по пути;
+     * - точечные пути любой глубины ('users.tags').
+     * 
+     * Триггеры пустоты: дефолт [null, '']; опция 'empty_values'
+     * ПЕРЕОПРЕДЕЛЯЕТ набор целиком (не дополняет).
+     * 
+     * Правила:
+     * - замена только если ключ присутствует и значение пусто;
+     *   отсутствующий ключ НЕ создаётся;
+     * - сравнение строгое (in_array strict): 0 и '0' пустыми не считаются;
+     * - замены резолвятся как выражения (field:, {{ }}) на этапе резолва
+     *   параметров;
+     * - путь в скаляр или отсутствующий путь — игнорируется;
+     * - уровни применяются по возрастанию глубины пути.
+     * 
+     * @param array $source Исходная коллекция (карта или список)
+     * @param array $spec Спека: путь => [поле => замена]
+     * @param array $options Опции: 'empty_values' => список пустых значений
+     * @return array Коллекция после замен
+     */
+    public function fillEmpty(array $source, array $spec, array $options = []): array
+    {
+        $emptyValues = array_key_exists('empty_values', $options)
+            ? (array) $options['empty_values']
+            : [null, ''];
+
+        $levels = [];
+        foreach ($spec as $path => $fills) {
+            $path = (string) $path;
+            $levels[] = [
+                'segments' => $path === '' ? [] : explode('.', $path),
+                'fills'    => is_array($fills) ? $fills : [],
+            ];
+        }
+
+        // Мелкие пути первыми; PHP 8 usort стабилен
+        usort($levels, static fn(array $a, array $b): int => count($a['segments']) <=> count($b['segments']));
+
+        $result = $source;
+        foreach ($levels as $level) {
+            if (empty($level['segments'])) {
+                $out = [];
+                foreach ($result as $key => $row) {
+                    $out[$key] = is_array($row)
+                        ? $this->fillRow($row, $level['fills'], $emptyValues)
+                        : $row;
+                }
+                $result = $out;
+                continue;
+            }
+            $result = $this->fillAtPath($result, $level['segments'], $level['fills'], $emptyValues);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Спускается по пути и заменяет пустые значения в строках.
+     * 
+     * @param array $collection Коллекция-владелец
+     * @param array $segments Сегменты пути
+     * @param array $fills Маппинг поле => замена
+     * @param array $emptyValues Список пустых значений
+     * @return array
+     */
+    private function fillAtPath(array $collection, array $segments, array $fills, array $emptyValues): array
+    {
+        $head = array_shift($segments);
+        $out = [];
+
+        foreach ($collection as $key => $item) {
+            if (!is_array($item) || !isset($item[$head]) || !is_array($item[$head])) {
+                // скаляр или отсутствие пути — не трогаем
+                $out[$key] = $item;
+                continue;
+            }
+
+            if (empty($segments)) {
+                $target = $item[$head];
+                if (array_is_list($target)) {
+                    $filled = [];
+                    foreach ($target as $rowKey => $row) {
+                        $filled[$rowKey] = is_array($row)
+                            ? $this->fillRow($row, $fills, $emptyValues)
+                            : $row;
+                    }
+                    $item[$head] = $filled;
+                } else {
+                    $item[$head] = $this->fillRow($target, $fills, $emptyValues);
+                }
+            } else {
+                $item[$head] = $this->fillAtPath($item[$head], $segments, $fills, $emptyValues);
+            }
+
+            $out[$key] = $item;
+        }
+
+        return $out;
+    }
+
+    /**
+     * Заменяет пустые значения полей в одной строке.
+     * Ключ отсутствует → не трогаем (не создаём).
+     * 
+     * @param array $row Строка
+     * @param array $fills Маппинг поле => замена
+     * @param array $emptyValues Список пустых значений
+     * @return array
+     */
+    private function fillRow(array $row, array $fills, array $emptyValues): array
+    {
+        foreach ($fills as $field => $replacement) {
+            if (array_key_exists($field, $row) && in_array($row[$field], $emptyValues, true)) {
+                $row[$field] = $replacement;
+            }
+        }
+        return $row;
+    }
 }

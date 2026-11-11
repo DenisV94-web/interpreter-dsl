@@ -11,7 +11,7 @@ use Api\Services\ArrayFilter;
  * Тесты сервиса ArrayTransformer: перегруппировка списков,
  * переименование полей, декларативные трансформации через fn+args.
  * 
- * Всего тестов: 26
+ * Всего тестов: 29
  * 
  * @package Api\Services\Actions\Testing
  */
@@ -66,6 +66,11 @@ class ArrayTransformerTest
         $this->testProjectTreeMissingDefaults();
         $this->testProjectTreeScalarPathIgnored();
         $this->testProjectTreeAfterFilterTree();
+
+        // fillEmpty (v1.25.0)
+        $this->testFillEmptyNullAndEmptyString();
+        $this->testFillEmptyCustomEmptyValues();
+        $this->testFillEmptyMissingKeyAndScalarPath();
 
         $this->logger->summary($this->passed, $this->failed);
 
@@ -857,6 +862,105 @@ class ArrayTransformerTest
             ],
             $result,
             'Связка filterTree → projectTree: строки отфильтрованы, поля спроецированы',
+            []
+        );
+    }
+
+    /**
+     * Фикстура fillEmpty: дыры null и '' в users и department
+     */
+    private function fillFixture(): array
+    {
+        return [
+            '451' => [
+                'department' => [
+                    'ID' => '451',
+                    'UF_PHONE_CITY' => '+78619449540',
+                    'UF_PHONE_MOBILE' => null,
+                    'CODE' => '',
+                ],
+                'users' => [
+                    ['ID' => '1', 'PERSONAL_PAGER' => null, 'COMMENT' => ''],
+                    ['ID' => '2', 'PERSONAL_PAGER' => '203', 'COMMENT' => 'ок'],
+                ],
+                'comment' => 'текст',
+            ],
+        ];
+    }
+
+    private function testFillEmptyNullAndEmptyString(): void
+    {
+        $this->logger->separator('testFillEmptyNullAndEmptyString');
+        $t = new ArrayTransformer();
+
+        $result = $t->fillEmpty($this->fillFixture(), [
+            'users' => ['PERSONAL_PAGER' => '—', 'COMMENT' => 'нет'],
+        ]);
+
+        $this->assert(
+            'testFillEmptyNullAndEmptyString',
+            [
+                ['ID' => '1', 'PERSONAL_PAGER' => '—', 'COMMENT' => 'нет'],
+                ['ID' => '2', 'PERSONAL_PAGER' => '203', 'COMMENT' => 'ок'],
+            ],
+            $result['451']['users'],
+            'null и "" заменены; непустые значения остались как есть',
+            []
+        );
+    }
+
+    private function testFillEmptyCustomEmptyValues(): void
+    {
+        $this->logger->separator('testFillEmptyCustomEmptyValues');
+        $t = new ArrayTransformer();
+
+        // empty_values переопределяет набор: '' больше НЕ пустое
+        $result = $t->fillEmpty(
+            $this->fillFixture(),
+            ['department' => ['UF_PHONE_MOBILE' => '—', 'CODE' => '—']],
+            ['empty_values' => [null]]
+        );
+
+        $this->assert(
+            'testFillEmptyCustomEmptyValues_NullReplaced',
+            '—',
+            $result['451']['department']['UF_PHONE_MOBILE'],
+            'null при empty_values [null] заменяется',
+            []
+        );
+
+        $this->assert(
+            'testFillEmptyCustomEmptyValues_EmptyStringKept',
+            '',
+            $result['451']['department']['CODE'],
+            "'' при empty_values [null] НЕ заменяется (набор переопределён)",
+            []
+        );
+    }
+
+    private function testFillEmptyMissingKeyAndScalarPath(): void
+    {
+        $this->logger->separator('testFillEmptyMissingKeyAndScalarPath');
+        $t = new ArrayTransformer();
+
+        $result = $t->fillEmpty($this->fillFixture(), [
+            'users'   => ['MISSING_FIELD' => 'x'],
+            'comment' => ['ID' => 'y'],
+        ]);
+
+        $this->assert(
+            'testFillEmptyMissingKey_NotCreated',
+            false,
+            array_key_exists('MISSING_FIELD', $result['451']['users'][0]),
+            'Отсутствующий ключ не создаётся',
+            []
+        );
+
+        $this->assert(
+            'testFillEmptyScalarPath_Ignored',
+            'текст',
+            $result['451']['comment'],
+            'Путь в скаляр игнорируется: comment не тронут',
             []
         );
     }
