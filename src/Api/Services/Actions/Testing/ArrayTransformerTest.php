@@ -11,7 +11,7 @@ use Api\Services\ArrayFilter;
  * Тесты сервиса ArrayTransformer: перегруппировка списков,
  * переименование полей, декларативные трансформации через fn+args.
  * 
- * Всего тестов: 35
+ * Всего тестов: 42
  * 
  * @package Api\Services\Actions\Testing
  */
@@ -79,6 +79,15 @@ class ArrayTransformerTest
         $this->testCollectKeyBy();
         $this->testCollectTemplate();
         $this->testCollectNestedAndUnique();
+
+        // patchTree (v1.27.0)
+        $this->testPatchTreeAddFieldByFuncEmpty();
+        $this->testPatchTreeOverwriteExisting();
+        $this->testPatchTreeComplexWhere();
+        $this->testPatchTreeCascade();
+        $this->testPatchTreeRootFrom();
+        $this->testPatchTreeSetTemplateAndItemCopy();
+        $this->testPatchTreeEmptyWhereAllRows();
 
         $this->logger->summary($this->passed, $this->failed);
 
@@ -1117,6 +1126,220 @@ class ArrayTransformerTest
                 ['from' => 'users', 'value' => 'P', 'unique' => true]
             ),
             'unique=true: дубли схлопнуты',
+            []
+        );
+    }
+
+    /**
+     * Фикстура patchTree: карта подразделений с дырами и блокировкой
+     */
+    private function patchFixture(): array
+    {
+        return [
+            '451' => [
+                'department' => ['ID' => '451', 'UF_TELEPHONY' => '2565'],
+                'users' => [
+                    ['ID' => '1', 'LAST_NAME' => 'Верещагин', 'NAME' => 'Денис', 'PERSONAL_PAGER' => '288', 'BLOCKED' => 'N', 'UF_DEPARTMENT' => [451], 'WORK_POSITION' => 'Продавец-консультант'],
+                    ['ID' => '2', 'LAST_NAME' => 'Колесникова', 'NAME' => 'Елена', 'PERSONAL_PAGER' => null, 'BLOCKED' => 'Y', 'UF_DEPARTMENT' => [451], 'WORK_POSITION' => 'Диспонент'],
+                ],
+            ],
+            '742' => [
+                'department' => ['ID' => '742', 'UF_TELEPHONY' => '2566'],
+                'users' => [
+                    ['ID' => '3', 'LAST_NAME' => 'Вершинин', 'NAME' => 'Александр', 'PERSONAL_PAGER' => '', 'BLOCKED' => 'N', 'UF_DEPARTMENT' => [742], 'WORK_POSITION' => 'Руководитель'],
+                ],
+            ],
+        ];
+    }
+
+    private function testPatchTreeAddFieldByFuncEmpty(): void
+    {
+        $this->logger->separator('testPatchTreeAddFieldByFuncEmpty');
+        $t = new ArrayTransformer();
+
+        $result = $t->patchTree($this->patchFixture(), [
+            [
+                'from'  => 'users',
+                'where' => ['PERSONAL_PAGER' => 'func:empty'],
+                'set'   => ['PERSONAL_PAGER_ERROR' => 'У менеджера нет внутреннего номера'],
+            ],
+        ]);
+
+        $this->assert(
+            'testPatchTreeAddFieldByFuncEmpty',
+            [false, true, true],
+            [
+                array_key_exists('PERSONAL_PAGER_ERROR', $result['451']['users'][0]),
+                array_key_exists('PERSONAL_PAGER_ERROR', $result['451']['users'][1]),
+                array_key_exists('PERSONAL_PAGER_ERROR', $result['742']['users'][0]),
+            ],
+            'func:empty: поле добавлено только строкам с пустым пейджером (null и "")',
+            []
+        );
+    }
+
+    private function testPatchTreeOverwriteExisting(): void
+    {
+        $this->logger->separator('testPatchTreeOverwriteExisting');
+        $t = new ArrayTransformer();
+
+        $result = $t->patchTree($this->patchFixture(), [
+            [
+                'from'  => 'users',
+                'where' => ['BLOCKED' => 'Y'],
+                'set'   => ['BLOCKED' => 'N', 'UNBLOCK_REASON' => 'проверен'],
+            ],
+        ]);
+
+        $this->assert(
+            'testPatchTreeOverwriteExisting',
+            ['N', 'проверен', false],
+            [
+                $result['451']['users'][1]['BLOCKED'],
+                $result['451']['users'][1]['UNBLOCK_REASON'],
+                array_key_exists('UNBLOCK_REASON', $result['451']['users'][0]),
+            ],
+            'set перезаписывает существующее поле и не трогает нематченные строки',
+            []
+        );
+    }
+
+    private function testPatchTreeComplexWhere(): void
+    {
+        $this->logger->separator('testPatchTreeComplexWhere');
+        $t = new ArrayTransformer();
+
+        $result = $t->patchTree($this->patchFixture(), [
+            [
+                'from'  => 'users',
+                'where' => [
+                    'logic' => 'AND',
+                    ['BLOCKED' => 'N'],
+                    [
+                        'logic' => 'OR',
+                        ['@UF_DEPARTMENT' => [742]],
+                        ['%WORK_POSITION' => 'диспонент'],
+                    ],
+                ],
+                'set' => ['PRIORITY' => 1],
+            ],
+        ]);
+
+        $this->assert(
+            'testPatchTreeComplexWhere',
+            [false, false, true],
+            [
+                array_key_exists('PRIORITY', $result['451']['users'][0]),
+                array_key_exists('PRIORITY', $result['451']['users'][1]),   // BLOCKED=Y → не попала
+                array_key_exists('PRIORITY', $result['742']['users'][0]),   // @UF_DEPARTMENT [742]
+            ],
+            'AND/OR-группы + @ (IN) + % (LIKE) в where работают',
+            []
+        );
+    }
+
+    private function testPatchTreeCascade(): void
+    {
+        $this->logger->separator('testPatchTreeCascade');
+        $t = new ArrayTransformer();
+
+        $result = $t->patchTree($this->patchFixture(), [
+            [
+                'from'  => 'users',
+                'where' => ['PERSONAL_PAGER' => 'func:empty'],
+                'set'   => ['PAGER_MISSING' => 1],
+            ],
+            [
+                'from'  => 'users',
+                'where' => ['PAGER_MISSING' => 1],
+                'set'   => ['CALL_ALLOWED' => 'N'],
+            ],
+        ]);
+
+        $this->assert(
+            'testPatchTreeCascade',
+            [false, 'N', 'N'],
+            [
+                array_key_exists('CALL_ALLOWED', $result['451']['users'][0]),
+                $result['451']['users'][1]['CALL_ALLOWED'] ?? null,
+                $result['742']['users'][0]['CALL_ALLOWED'] ?? null,
+            ],
+            'Второе правило видит поле, добавленное первым (каскад)',
+            []
+        );
+    }
+
+    private function testPatchTreeRootFrom(): void
+    {
+        $this->logger->separator('testPatchTreeRootFrom');
+        $t = new ArrayTransformer();
+
+        $result = $t->patchTree($this->patchFixture(), [
+            [
+                'from'  => '',
+                'where' => ['department.UF_TELEPHONY' => '2566'],
+                'set'   => ['TELEPHONY_GROUP' => 'TMN'],
+            ],
+        ]);
+
+        $this->assert(
+            'testPatchTreeRootFrom',
+            [false, 'TMN'],
+            [
+                array_key_exists('TELEPHONY_GROUP', $result['451']),
+                $result['742']['TELEPHONY_GROUP'] ?? null,
+            ],
+            "from '': патчинг самих строк корня по вложенному пути в where",
+            []
+        );
+    }
+
+    private function testPatchTreeSetTemplateAndItemCopy(): void
+    {
+        $this->logger->separator('testPatchTreeSetTemplateAndItemCopy');
+        $t = new ArrayTransformer();
+
+        $result = $t->patchTree($this->patchFixture(), [
+            [
+                'from'  => 'users',
+                'where' => ['ID' => '1'],
+                'set'   => [
+                    'FIO'         => '{{item:LAST_NAME}} {{item:NAME}}',
+                    'USER_ID_COPY' => 'item:ID',
+                ],
+            ],
+        ]);
+
+        $this->assert(
+            'testPatchTreeSetTemplateAndItemCopy',
+            ['Верещагин Денис', '1'],
+            [
+                $result['451']['users'][0]['FIO'],
+                $result['451']['users'][0]['USER_ID_COPY'],
+            ],
+            '{{item:}}-шаблон и сырая item:-копия в set',
+            []
+        );
+    }
+
+    private function testPatchTreeEmptyWhereAllRows(): void
+    {
+        $this->logger->separator('testPatchTreeEmptyWhereAllRows');
+        $t = new ArrayTransformer();
+
+        $result = $t->patchTree($this->patchFixture(), [
+            ['from' => 'users', 'set' => ['SRC' => 'desktop']],
+        ]);
+
+        $this->assert(
+            'testPatchTreeEmptyWhereAllRows',
+            [true, true, true],
+            [
+                array_key_exists('SRC', $result['451']['users'][0]),
+                array_key_exists('SRC', $result['451']['users'][1]),
+                array_key_exists('SRC', $result['742']['users'][0]),
+            ],
+            'Пустой where → правило бьёт по всем строкам коллекции',
             []
         );
     }

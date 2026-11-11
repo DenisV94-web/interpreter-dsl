@@ -817,7 +817,7 @@ class ArrayTransformer
         return $row;
     }
 
-        // ========================================================
+    // ========================================================
     // COLLECT — СБОРКА НОВОГО МАССИВА ИЗ ДЕРЕВА (v1.26.0)
     // ========================================================
 
@@ -1034,5 +1034,145 @@ class ArrayTransformer
             $current = $current[$segment];
         }
         return $current;
+    }
+
+    // ========================================================
+    // PATCHTREE — УСЛОВНЫЙ ПАТЧИНГ СТРОК ДЕРЕВА (v1.27.0)
+    // ========================================================
+
+    /**
+     * Условный патчинг строк дерева: поиск по условию + добавление
+     * или перезапись полей (v1.27.0).
+     * 
+     * Спека — упорядоченный список правил; правило:
+     * - 'from'  — точечный путь до итерируемой коллекции внутри строки
+     *             корня ('' — сами строки корня);
+     * - 'where' — условие грамматикой Condition по строке: logic AND/OR,
+     *             вложенные группы, операторы Битрикс в ключах,
+     *             func:-проверки whitelist, '_key';
+     *             пусто/отсутствует → правило бьёт по всем строкам;
+     * - 'set'   — маппинг поле => значение: ключа нет → добавляется,
+     *             есть → перезаписывается.
+     * 
+     * Значения set:
+     * - литералы и всё, что резолвится об глобальный контекст ЕЩЁ до
+     *   вызова (field:, date:, {{ }}) — через resolveParams;
+     * - '{{item:X}}' — шаблон по полям текущей строки;
+     * - 'item:X' — сырое копирование значения поля строки с типом.
+     * 
+     * Правила применяются последовательно: следующее правило видит
+     * изменения предыдущего (каскады).
+     * 
+     * @param array $source Исходная коллекция (карта или список)
+     * @param array $rules Список правил
+     * @return array Коллекция после патчинга
+     */
+    public function patchTree(array $source, array $rules): array
+    {
+        $result = $source;
+
+        foreach ($rules as $rule) {
+            if (!is_array($rule)) {
+                continue;
+            }
+
+            $from  = (string) ($rule['from'] ?? '');
+            $where = is_array($rule['where'] ?? null) ? $rule['where'] : [];
+            $set   = is_array($rule['set'] ?? null) ? $rule['set'] : [];
+
+            if (empty($set)) {
+                continue;
+            }
+
+            if ($from === '') {
+                foreach ($result as $key => $row) {
+                    if (is_array($row) && TreeConditionMatcher::matchGroup($row, $where, $key)) {
+                        $result[$key] = $this->patchRow($row, $set);
+                    }
+                }
+                continue;
+            }
+
+            $result = $this->patchAtPath($result, explode('.', $from), $where, $set);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Спускается по пути и патчит строки найденных коллекций.
+     * 
+     * @param array $collection Коллекция-владелец
+     * @param array $segments Сегменты пути
+     * @param array $where Условие
+     * @param array $set Маппинг замен
+     * @return array
+     */
+    private function patchAtPath(array $collection, array $segments, array $where, array $set): array
+    {
+        $head = array_shift($segments);
+        $out = [];
+
+        foreach ($collection as $key => $item) {
+            if (!is_array($item) || !isset($item[$head]) || !is_array($item[$head])) {
+                // скаляр или отсутствие пути — не трогаем
+                $out[$key] = $item;
+                continue;
+            }
+
+            if (empty($segments)) {
+                $target = $item[$head];
+
+                if (array_is_list($target)) {
+                    $patched = [];
+                    foreach ($target as $rowKey => $row) {
+                        $patched[$rowKey] = (is_array($row) && TreeConditionMatcher::matchGroup($row, $where, $rowKey))
+                            ? $this->patchRow($row, $set)
+                            : $row;
+                    }
+                    $item[$head] = $patched;
+                } else {
+                    // assoc-объект по пути: '_key' в where = ключ строки-владельца
+                    $item[$head] = TreeConditionMatcher::matchGroup($target, $where, $key)
+                        ? $this->patchRow($target, $set)
+                        : $target;
+                }
+            } else {
+                $item[$head] = $this->patchAtPath($item[$head], $segments, $where, $set);
+            }
+
+            $out[$key] = $item;
+        }
+
+        return $out;
+    }
+
+    /**
+     * Применяет set к одной строке: добавление/перезапись полей.
+     * 
+     * @param array $row Строка
+     * @param array $set Маппинг поле => значение
+     * @return array
+     */
+    private function patchRow(array $row, array $set): array
+    {
+        foreach ($set as $field => $value) {
+            // Сырое копирование поля строки с типом
+            if (is_string($value) && strncmp($value, 'item:', 5) === 0) {
+                $row[$field] = $row[substr($value, 5)] ?? null;
+                continue;
+            }
+
+            // Шаблон по полям текущей строки
+            if (is_string($value) && strpos($value, '{{item:') !== false) {
+                $row[$field] = $this->resolveItemTemplate($value, $row);
+                continue;
+            }
+
+            // Литерал / зарезолвленное об контекст значение
+            $row[$field] = $value;
+        }
+
+        return $row;
     }
 }

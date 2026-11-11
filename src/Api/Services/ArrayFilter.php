@@ -305,41 +305,7 @@ class ArrayFilter
      */
     private function treeMatchesGroup(array $row, array $group, $rowKey): bool
     {
-        if (empty($group)) {
-            return true;
-        }
-
-        $logic = (isset($group['logic']) && strtoupper((string) $group['logic']) === 'OR')
-            ? 'OR'
-            : 'AND';
-
-        $results = [];
-        foreach ($group as $key => $condition) {
-            if ($key === 'logic') {
-                continue;
-            }
-
-            if (is_int($key) && is_array($condition)) {
-                $results[] = $this->treeMatchesGroup($row, $condition, $rowKey);
-                continue;
-            }
-
-            if (is_string($key)) {
-                $results[] = $this->treeMatchCondition($row, $key, $condition, $rowKey);
-                continue;
-            }
-
-            // Мусор в конфиге (числовой ключ, не массив) — не влияем
-            $results[] = true;
-        }
-
-        if (empty($results)) {
-            return true;
-        }
-
-        return $logic === 'OR'
-            ? in_array(true, $results, true)
-            : !in_array(false, $results, true);
+        return TreeConditionMatcher::matchGroup($row, $group, $rowKey);
     }
 
     /**
@@ -353,49 +319,7 @@ class ArrayFilter
      */
     private function treeMatchCondition(array $row, string $key, $expected, $rowKey): bool
     {
-        $operator = '=';
-        $path = $key;
-
-        // Двухсимвольные раньше однсимвольных; '!' после '!@' и '!='
-        foreach (['!@', '<=', '>=', '!=', '@', '!', '<', '>', '%'] as $op) {
-            if (strncmp($key, $op, strlen($op)) === 0) {
-                $operator = $op;
-                $path = substr($key, strlen($op));
-                break;
-            }
-        }
-
-        if ($path === '_key') {
-            $actual = $rowKey;
-        } else {
-            [$found, $actual] = $this->treeGetValue($row, $path);
-            if (!$found) {
-                return false;   // нет поля → строка исключается
-            }
-        }
-
-        switch ($operator) {
-            case '@':
-                return $this->treeIn($actual, $expected);
-            case '!@':
-                return !$this->treeIn($actual, $expected);
-            case '%':
-                return is_scalar($actual) && is_scalar($expected)
-                    && mb_stripos((string) $actual, (string) $expected) !== false;
-            case '<=':
-                return $actual <= $expected;
-            case '>=':
-                return $actual >= $expected;
-            case '<':
-                return $actual < $expected;
-            case '>':
-                return $actual > $expected;
-            case '!=':
-            case '!':
-                return $actual != $expected;
-            default:
-                return $actual == $expected;
-        }
+        return TreeConditionMatcher::matchCondition($row, $key, $expected, $rowKey);
     }
 
     /**
