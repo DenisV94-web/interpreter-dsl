@@ -816,4 +816,223 @@ class ArrayTransformer
         }
         return $row;
     }
+
+        // ========================================================
+    // COLLECT — СБОРКА НОВОГО МАССИВА ИЗ ДЕРЕВА (v1.26.0)
+    // ========================================================
+
+    /**
+     * Собирает новый массив (одномерный или многомерный) из дерева (v1.26.0).
+     * 
+     * Спека:
+     * - 'from'       — точечный путь до итерируемой коллекции внутри строки
+     *                  корня; '' (дефолт) — итерировать сами строки корня;
+     * - 'value'      — что собирать: точечный путь по строке, '_key' (ключ
+     *                  строки), '@self' (сам элемент), '{{item:X}}'-шаблон,
+     *                  вложенная спека collect (массив) — рекурсия;
+     * - 'group_by'   — строка|массив путей по строке-владельцу (корневой
+     *                  строке при from != ''); '_key' — ключ владельца;
+     *                  массив путей = вложенные группы (многомерность);
+     * - 'key_by'     — поле итерируемой строки: внутренний уровень становится
+     *                  картой key_by-значение => value вместо списка;
+     * - 'skip_empty' — дефолт true: не собирать значения из набора пустот;
+     * - 'unique'     — дефолт false: дедупликация значений (строгое сравнение)
+     *                  внутри каждой итоговой коллекции.
+     * 
+     * Опции (3-й аргумент):
+     * - 'empty_values' — набор пустот (дефолт [null, '']), переопределяет целиком.
+     * 
+     * Правила:
+     * - пустые группы не создаются: группа появляется, только когда в неё
+     *   легло хотя бы одно значение;
+     * - ключ группы null/отсутствует/массив → значение пропускается;
+     * - key_by null/отсутствует/массив → значение пропускается;
+     * - порядок групп — по первому появлению, значений — по порядку обхода;
+     * - числовые ключи нормализуются PHP в int (как везде в DSL).
+     * 
+     * @param array $source Исходная коллекция (карта или список)
+     * @param array $spec Спека сбора
+     * @param array $options Опции: 'empty_values'
+     * @return array Собранный массив
+     */
+    public function collect(array $source, array $spec, array $options = []): array
+    {
+        $emptyValues = array_key_exists('empty_values', $options)
+            ? (array) $options['empty_values']
+            : [null, ''];
+        $skipEmpty = (bool) ($spec['skip_empty'] ?? true);
+        $unique    = (bool) ($spec['unique'] ?? false);
+        $from      = (string) ($spec['from'] ?? '');
+        $valueSpec = $spec['value'] ?? null;
+        $groupBy   = $spec['group_by'] ?? null;
+        $keyBy     = $spec['key_by'] ?? null;
+
+        $collector = [];
+
+        foreach ($source as $ownerKey => $ownerRow) {
+            if (!is_array($ownerRow)) {
+                continue;
+            }
+
+            if ($from === '') {
+                $rows = [$ownerKey => $ownerRow];
+            } else {
+                $target = $this->collectGetPath($ownerRow, $from);
+                if (!is_array($target)) {
+                    continue;
+                }
+                $rows = $target;
+            }
+
+            // Группа определяется владельцем — считаем один раз на владельца
+            $groupKeys = $this->collectGroupKeys($ownerRow, $ownerKey, $groupBy);
+            if ($groupKeys === null) {
+                continue;
+            }
+
+            foreach ($rows as $rowKey => $row) {
+                $value = $this->collectValue($row, $rowKey, $valueSpec, $options);
+
+                if ($skipEmpty && (in_array($value, $emptyValues, true) || (is_array($value) && $value === []))) {
+                    continue;
+                }
+
+                if ($keyBy !== null) {
+                    if (!is_array($row)) {
+                        continue;
+                    }
+                    $keyValue = $row[$keyBy] ?? null;
+                    if ($keyValue === null || is_array($keyValue)) {
+                        continue;
+                    }
+                    $collector = $this->collectInsert($collector, $groupKeys, $keyValue, $value, $unique, true);
+                    continue;
+                }
+
+                $collector = $this->collectInsert($collector, $groupKeys, null, $value, $unique, false);
+            }
+        }
+
+        return $collector;
+    }
+
+    /**
+     * Значение для сбора из одной строки.
+     * 
+     * @param mixed $row Строка (или скаляр при итерации скалярных списков)
+     * @param mixed $rowKey Ключ строки
+     * @param mixed $valueSpec Спека значения
+     * @param array $options Опции collect (для вложенной спеки)
+     * @return mixed
+     */
+    private function collectValue($row, $rowKey, $valueSpec, array $options)
+    {
+        // Вложенная спека collect: строка становится источником (рекурсия)
+        if (is_array($valueSpec)) {
+            return is_array($row) ? $this->collect([$row], $valueSpec, $options) : null;
+        }
+
+        if ($valueSpec === '@self') {
+            return $row;
+        }
+
+        if ($valueSpec === '_key') {
+            return $rowKey;
+        }
+
+        if (is_string($valueSpec) && strpos($valueSpec, '{{item:') !== false) {
+            return is_array($row) ? $this->resolveItemTemplate($valueSpec, $row) : null;
+        }
+
+        if (is_string($valueSpec)) {
+            return is_array($row) ? $this->collectGetPath($row, $valueSpec) : null;
+        }
+
+        return null;
+    }
+
+    /**
+     * Ключи группировки из строки-владельца.
+     * null в ответе = значение пропускается целиком.
+     * 
+     * @param array $ownerRow Строка-владелец
+     * @param mixed $ownerKey Ключ владельца
+     * @param mixed $groupBy Спека group_by
+     * @return array|null
+     */
+    private function collectGroupKeys(array $ownerRow, $ownerKey, $groupBy): ?array
+    {
+        if ($groupBy === null || $groupBy === []) {
+            return [];
+        }
+
+        $paths = is_array($groupBy) ? $groupBy : [$groupBy];
+        $keys = [];
+
+        foreach ($paths as $path) {
+            $value = ($path === '_key')
+                ? $ownerKey
+                : $this->collectGetPath($ownerRow, (string) $path);
+
+            if ($value === null || is_array($value)) {
+                return null;
+            }
+            $keys[] = $value;
+        }
+
+        return $keys;
+    }
+
+    /**
+     * Вставка значения в коллектор по цепочке групп (+ key_by/unique).
+     * 
+     * @param array $node Текущий узел коллектора
+     * @param array $groupKeys Оставшиеся ключи групп
+     * @param mixed $keyValue Значение key_by (или null)
+     * @param mixed $value Собираемое значение
+     * @param bool $unique Дедупликация
+     * @param bool $hasKeyBy Режим карты
+     * @return array
+     */
+    private function collectInsert(array $node, array $groupKeys, $keyValue, $value, bool $unique, bool $hasKeyBy): array
+    {
+        if (empty($groupKeys)) {
+            if ($hasKeyBy) {
+                $node[$keyValue] = $value;
+                return $node;
+            }
+            if ($unique && in_array($value, $node, true)) {
+                return $node;
+            }
+            $node[] = $value;
+            return $node;
+        }
+
+        $head = array_shift($groupKeys);
+        if (!isset($node[$head]) || !is_array($node[$head])) {
+            $node[$head] = [];
+        }
+        $node[$head] = $this->collectInsert($node[$head], $groupKeys, $keyValue, $value, $unique, $hasKeyBy);
+
+        return $node;
+    }
+
+    /**
+     * Значение по точечному пути из строки; нет пути → null.
+     * 
+     * @param array $row Строка
+     * @param string $path Точечный путь
+     * @return mixed
+     */
+    private function collectGetPath(array $row, string $path)
+    {
+        $current = $row;
+        foreach (explode('.', $path) as $segment) {
+            if (!is_array($current) || !array_key_exists($segment, $current)) {
+                return null;
+            }
+            $current = $current[$segment];
+        }
+        return $current;
+    }
 }

@@ -11,7 +11,7 @@ use Api\Services\ArrayFilter;
  * Тесты сервиса ArrayTransformer: перегруппировка списков,
  * переименование полей, декларативные трансформации через fn+args.
  * 
- * Всего тестов: 29
+ * Всего тестов: 35
  * 
  * @package Api\Services\Actions\Testing
  */
@@ -71,6 +71,14 @@ class ArrayTransformerTest
         $this->testFillEmptyNullAndEmptyString();
         $this->testFillEmptyCustomEmptyValues();
         $this->testFillEmptyMissingKeyAndScalarPath();
+
+        // collect (v1.26.0)
+        $this->testCollectFlatAndSkipEmpty();
+        $this->testCollectGroupByKey();
+        $this->testCollectMultiGroup();
+        $this->testCollectKeyBy();
+        $this->testCollectTemplate();
+        $this->testCollectNestedAndUnique();
 
         $this->logger->summary($this->passed, $this->failed);
 
@@ -961,6 +969,154 @@ class ArrayTransformerTest
             'текст',
             $result['451']['comment'],
             'Путь в скаляр игнорируется: comment не тронут',
+            []
+        );
+    }
+
+    /**
+     * Фикстура collect: карта подразделений с дырами в пейджерах
+     */
+    private function collectFixture(): array
+    {
+        return [
+            '451' => [
+                'department' => ['ID' => '451', 'UF_TELEPHONY' => '2565'],
+                'users' => [
+                    ['ID' => '1', 'LAST_NAME' => 'Верещагин', 'NAME' => 'Денис', 'PERSONAL_PAGER' => '288', 'UF_DEPARTMENT' => [451, 790]],
+                    ['ID' => '2', 'LAST_NAME' => 'Брикалов', 'NAME' => 'Алексей', 'PERSONAL_PAGER' => null],
+                    ['ID' => '3', 'LAST_NAME' => 'Колесникова', 'NAME' => 'Елена', 'PERSONAL_PAGER' => ''],
+                ],
+            ],
+            '742' => [
+                'department' => ['ID' => '742', 'UF_TELEPHONY' => '2566'],
+                'users' => [
+                    ['ID' => '4', 'LAST_NAME' => 'Вершинин', 'NAME' => 'Александр', 'PERSONAL_PAGER' => '3500', 'UF_DEPARTMENT' => [742]],
+                ],
+            ],
+            '54' => [
+                'department' => ['ID' => '54', 'UF_TELEPHONY' => '2565'],
+                'users' => [],
+            ],
+        ];
+    }
+
+    private function testCollectFlatAndSkipEmpty(): void
+    {
+        $this->logger->separator('testCollectFlatAndSkipEmpty');
+        $t = new ArrayTransformer();
+
+        $this->assert(
+            'testCollectFlat_SkipEmptyDefault',
+            ['288', '3500'],
+            $t->collect($this->collectFixture(), ['from' => 'users', 'value' => 'PERSONAL_PAGER']),
+            'Плоский список: null и "" пропущены (skip_empty дефолт true)',
+            []
+        );
+
+        $this->assert(
+            'testCollectFlat_SkipEmptyFalse',
+            ['288', null, '', '3500'],
+            $t->collect($this->collectFixture(), ['from' => 'users', 'value' => 'PERSONAL_PAGER', 'skip_empty' => false]),
+            'skip_empty=false: дырки сохраняются',
+            []
+        );
+    }
+
+    private function testCollectGroupByKey(): void
+    {
+        $this->logger->separator('testCollectGroupByKey');
+        $t = new ArrayTransformer();
+
+        $this->assert(
+            'testCollectGroupByKey',
+            [451 => ['288'], 742 => ['3500']],
+            $t->collect($this->collectFixture(), ['from' => 'users', 'value' => 'PERSONAL_PAGER', 'group_by' => '_key']),
+            'group_by _key: карта подразделений; пустое 54 не создано',
+            []
+        );
+    }
+
+    private function testCollectMultiGroup(): void
+    {
+        $this->logger->separator('testCollectMultiGroup');
+        $t = new ArrayTransformer();
+
+        $this->assert(
+            'testCollectMultiGroup',
+            [2565 => [451 => ['288']], 2566 => [742 => ['3500']]],
+            $t->collect($this->collectFixture(), [
+                'from' => 'users',
+                'value' => 'PERSONAL_PAGER',
+                'group_by' => ['department.UF_TELEPHONY', '_key'],
+            ]),
+            'Массив group_by: вложенные группы телефония → подразделение',
+            []
+        );
+    }
+
+    private function testCollectKeyBy(): void
+    {
+        $this->logger->separator('testCollectKeyBy');
+        $t = new ArrayTransformer();
+
+        $this->assert(
+            'testCollectKeyBy',
+            [451 => [1 => '288'], 742 => [4 => '3500']],
+            $t->collect($this->collectFixture(), [
+                'from' => 'users',
+                'value' => 'PERSONAL_PAGER',
+                'group_by' => '_key',
+                'key_by' => 'ID',
+            ]),
+            'key_by: внутренний уровень — карта user_id => pager',
+            []
+        );
+    }
+
+    private function testCollectTemplate(): void
+    {
+        $this->logger->separator('testCollectTemplate');
+        $t = new ArrayTransformer();
+
+        $this->assert(
+            'testCollectTemplate',
+            [
+                'Верещагин Денис',
+                'Брикалов Алексей',
+                'Колесникова Елена',
+                'Вершинин Александр',   // пользователь департамента 742 — collect обходит ВСЕХ владельцев
+            ],
+            $t->collect($this->collectFixture(), ['from' => 'users', 'value' => '{{item:LAST_NAME}} {{item:NAME}}']),
+            '{{item:}}-шаблон как value: склейка полей каждой строки всех подразделений',
+            []
+        );
+    }
+
+    private function testCollectNestedAndUnique(): void
+    {
+        $this->logger->separator('testCollectNestedAndUnique');
+        $t = new ArrayTransformer();
+
+        $this->assert(
+            'testCollectNestedSpec',
+            [451 => [[451, 790]], 742 => [[742]]],
+            $t->collect($this->collectFixture(), [
+                'from' => 'users',
+                'value' => ['from' => 'UF_DEPARTMENT', 'value' => '@self'],
+                'group_by' => '_key',
+            ]),
+            'Вложенная спека value: список департаментов каждого пользователя',
+            []
+        );
+
+        $this->assert(
+            'testCollectUnique',
+            ['1', '2'],
+            $t->collect(
+                ['a' => ['users' => [['P' => '1'], ['P' => '1'], ['P' => '2']]]],
+                ['from' => 'users', 'value' => 'P', 'unique' => true]
+            ),
+            'unique=true: дубли схлопнуты',
             []
         );
     }
