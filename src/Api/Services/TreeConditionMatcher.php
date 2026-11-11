@@ -74,11 +74,17 @@ class TreeConditionMatcher
 
     /**
      * Одно условие: оператор в ключе + путь/'_key' слева,
-     * литерал/func:-проверка справа.
+     * литерал / func:-проверка справа.
+     * 
+     * func:-проверка принимается в двух формах:
+     * - строка 'func:name' — прямые вызовы, тесты;
+     * - дескриптор ['type' => 'function', 'name' => ...] — боевой путь:
+     *   resolveParams прогоняет правую часть через Field, который
+     *   превращает 'func:'-строки в дескрипторы (как для Condition).
      * 
      * @param array $row Строка коллекции
      * @param string $key Ключ условия с оператором
-     * @param mixed $expected Ожидаемое значение или 'func:...'
+     * @param mixed $expected Ожидаемое значение, 'func:...' или дескриптор
      * @param mixed $rowKey Ключ строки
      * @return bool
      */
@@ -96,7 +102,18 @@ class TreeConditionMatcher
             }
         }
 
-        $isFunc = is_string($expected) && strncmp($expected, 'func:', 5) === 0;
+        // func:-проверка: строка или дескриптор Field
+        $funcName = null;
+        if (is_string($expected) && strncmp($expected, 'func:', 5) === 0) {
+            $funcName = substr($expected, 5);
+        } elseif (
+            is_array($expected)
+            && ($expected['type'] ?? null) === 'function'
+            && isset($expected['name'])
+        ) {
+            $funcName = (string) $expected['name'];
+        }
+        $isFunc = $funcName !== null;
 
         if ($path === '_key') {
             $actual = $rowKey;
@@ -113,7 +130,7 @@ class TreeConditionMatcher
 
         // func:-проверка из whitelist
         if ($isFunc) {
-            $checkResult = self::runFuncCheck(substr($expected, 5), $actual);
+            $checkResult = self::runFuncCheck($funcName, $actual);
 
             if ($checkResult === null) {
                 return false;   // неизвестный func: → false

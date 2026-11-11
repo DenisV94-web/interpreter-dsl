@@ -571,6 +571,12 @@ Whitelist оценатора `TreeConditionMatcher` (v1.27.0):
 `func:` = null (семантика Condition), для литеральных условий —
 строка исключается (как в filterTree 1.23.0).
 
+**Важно (v1.27.2):** правая часть `'func:empty'` в боевых конфигах
+приходит в метод дескриптором `['type' => 'function', 'name' => 'empty']`
+(resolveParams гоняет params через Field до вызова метода).
+`TreeConditionMatcher` понимает обе формы: строку и дескриптор.
+`literal:func:empty` передаёт строку как есть (без превращения в дескриптор).
+
 ---
 
 ## Где живёт

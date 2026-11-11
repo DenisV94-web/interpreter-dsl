@@ -4,6 +4,7 @@ namespace Api\Services\Actions\Testing;
 
 use Api\Services\ArrayTransformer;
 use Api\Services\ArrayFilter;
+use Api\Services\TreeConditionMatcher;
 
 /**
  * Class ArrayTransformerTest
@@ -88,6 +89,7 @@ class ArrayTransformerTest
         $this->testPatchTreeRootFrom();
         $this->testPatchTreeSetTemplateAndItemCopy();
         $this->testPatchTreeEmptyWhereAllRows();
+        $this->testMatchConditionFuncDescriptor();
 
         $this->logger->summary($this->passed, $this->failed);
 
@@ -1340,6 +1342,33 @@ class ArrayTransformerTest
                 array_key_exists('SRC', $result['742']['users'][0]),
             ],
             'Пустой where → правило бьёт по всем строкам коллекции',
+            []
+        );
+    }
+
+    /**
+     * func:-проверка в форме дескриптора Field (боевой путь через resolveParams)
+     */
+    private function testMatchConditionFuncDescriptor(): void
+    {
+        $this->logger->separator('testMatchConditionFuncDescriptor');
+
+        // Именно в таком виде правая часть приезжает из resolveParams
+        $descriptor = ['type' => 'function', 'name' => 'empty'];
+
+        $this->assert(
+            'testMatchConditionFuncDescriptor_Empty',
+            true,
+            TreeConditionMatcher::matchCondition(['P' => ''], 'P', $descriptor, 0),
+            'Дескриптор func:empty над "" → true',
+            []
+        );
+
+        $this->assert(
+            'testMatchConditionFuncDescriptor_NonEmpty',
+            false,
+            TreeConditionMatcher::matchCondition(['P' => '3506'], 'P', $descriptor, 0),
+            'Дескриптор func:empty над "3506" → false',
             []
         );
     }

@@ -1115,7 +1115,6 @@ class ArrayTransformer
 
         foreach ($collection as $key => $item) {
             if (!is_array($item) || !isset($item[$head]) || !is_array($item[$head])) {
-                // скаляр или отсутствие пути — не трогаем
                 $out[$key] = $item;
                 continue;
             }
@@ -1123,20 +1122,15 @@ class ArrayTransformer
             if (empty($segments)) {
                 $target = $item[$head];
 
-                if (array_is_list($target)) {
-                    $patched = [];
-                    foreach ($target as $rowKey => $row) {
-                        $patched[$rowKey] = (is_array($row) && TreeConditionMatcher::matchGroup($row, $where, $rowKey))
-                            ? $this->patchRow($row, $set)
-                            : $row;
-                    }
-                    $item[$head] = $patched;
-                } else {
-                    // assoc-объект по пути: '_key' в where = ключ строки-владельца
-                    $item[$head] = TreeConditionMatcher::matchGroup($target, $where, $key)
-                        ? $this->patchRow($target, $set)
-                        : $target;
+                // УБРАЛИ array_is_list — всегда итерируем как список строк
+                // Это работает и для числовых ключей (0,1,2) и для строковых ("0","1","2")
+                $patched = [];
+                foreach ($target as $rowKey => $row) {
+                    $patched[$rowKey] = (is_array($row) && TreeConditionMatcher::matchGroup($row, $where, $rowKey))
+                        ? $this->patchRow($row, $set)
+                        : $row;
                 }
+                $item[$head] = $patched;
             } else {
                 $item[$head] = $this->patchAtPath($item[$head], $segments, $where, $set);
             }
