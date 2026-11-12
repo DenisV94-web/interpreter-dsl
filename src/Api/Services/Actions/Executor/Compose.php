@@ -61,13 +61,20 @@ class Compose
     /**
      * Собирает итоговую структуру ответа
      * 
-     * @param array $config Конфигурация compose
-     * @return array Собранный ответ
+     * Две формы:
+     * - карта `['key' => 'field:X', ...]` — рекурсивная сборка по ключам;
+     * - строка `'field:X'` (v1.29.0) — корневое выражение: резолвится
+     *   целиком и возвращается как есть (без обёртки в ключ). Кейс:
+     *   «отдать дерево/список/скаляр прямо как корень ответа».
+     * 
+     * @param array|string $config Конфигурация compose
+     * @return mixed Собранный ответ (карта, список, скаляр, null)
      */
-    public function execute(array $config): array
+    public function execute(array|string $config): mixed
     {
         $this->context->log('INFO', 'Compose', '=== НАЧАЛО СБОРКИ ОТВЕТА ===');
 
+        // v1.29.0: корневое выражение (строка)
         if (is_string($config)) {
             $result = $this->fieldResolver->resolve($config);
             $this->context->response = $result;

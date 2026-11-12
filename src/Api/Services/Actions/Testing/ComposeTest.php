@@ -23,7 +23,7 @@ use Api\Services\Actions\Executor\Compose;
  * 
  * Лог: Compose_YYYY-MM-DD_HH-II-SS.log
  * 
- * Всего тестов: 2
+ * Всего тестов: 4
  * 
  * @package Api\Services\Actions\Testing
  */
@@ -76,6 +76,11 @@ class ComposeTest
 
         $this->testSimpleCompose();
         $this->testNestedComposeWithLists();
+
+
+        // Compose строковая форма (v1.29.0)
+        $this->testComposeStringFormMap();
+        $this->testComposeStringFormScalar();
 
         $this->logger->summary($this->passed, $this->failed);
 
@@ -210,6 +215,60 @@ class ComposeTest
             $compose->execute($config),
             'Tabs должны собраться со списками (field: подставляет массив целиком)',
             ['config' => 'tabs с вложенными списками']
+        );
+    }
+
+    /**
+     * Строковая форма: массив (дерево/список) резолвится и возвращается целиком.
+     */
+    private function testComposeStringFormMap(): void
+    {
+        $this->logger->separator('testComposeStringFormMap');
+
+        $context = new Context([]);
+        $context->set('users_view', ['742' => ['users' => [['ID' => '1']]]]);
+        $fieldResolver = new Field($context);
+        $compose = new Compose($context, $fieldResolver);
+
+        $result = $compose->execute('field:users_view');
+
+        $this->assert(
+            'testComposeStringFormMap',
+            ['742' => ['users' => [['ID' => '1']]]],
+            $result,
+            'Строковая форма: массив резолвится и возвращается как есть (без ключей-обёрток)',
+            []
+        );
+
+        $this->assert(
+            'testComposeStringFormMap_Response',
+            ['742' => ['users' => [['ID' => '1']]]],
+            $context->response,
+            'context.response установлен в то же значение',
+            []
+        );
+    }
+
+    /**
+     * Строковая форма: скаляр (например число) проходит как есть.
+     */
+    private function testComposeStringFormScalar(): void
+    {
+        $this->logger->separator('testComposeStringFormScalar');
+
+        $context = new Context([]);
+        $context->set('count', 42);
+        $fieldResolver = new Field($context);
+        $compose = new Compose($context, $fieldResolver);
+
+        $result = $compose->execute('field:count');
+
+        $this->assert(
+            'testComposeStringFormScalar',
+            42,
+            $result,
+            'Строковая форма: скаляр проходит как есть',
+            []
         );
     }
     
