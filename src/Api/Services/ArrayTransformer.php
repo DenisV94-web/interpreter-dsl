@@ -1169,4 +1169,117 @@ class ArrayTransformer
 
         return $row;
     }
+
+    // ========================================================
+    // ENRICHFROMLOOKUP — ДЖОЙН СТРОК С ВНЕШНЕЙ КАРТОЙ (v1.28.0)
+    // ========================================================
+
+    /**
+     * обогащает строки коллекции значениями из внешней карты (lookup):
+     * по значению поля-ключа строки ищет ключ в карте и дописывает
+     * найденный объект целиком в новое поле.
+     * 
+     * Кейс: статусы SIP-extensions телефонии ({pager: {tech, online, ...}})
+     * прикрепляются к пользователям по PERSONAL_PAGER.
+     * 
+     * Правила:
+     * - поле-ключ пусто (null/'') или отсутствует → строка не трогается;
+     * - ключ найден в lookup → весь объект lookup пишется в targetField;
+     * - ключ не найден → null в targetField (фронт отличает «нет ключа»
+     *   от «ключ не найден в телефонии»);
+     * - ключи сравниваются как строки: числовые ключи json_decode
+     *   (int 3500) и строковые значения полей ('3500') матчатся;
+     * - путь до коллекции — точечный ('a.users'); '' — строки корня.
+     * 
+     * @param array $source Исходная коллекция (дерево)
+     * @param array $lookup Карта: ключ => объект данных
+     * @param string $nestedPath Путь до коллекции внутри строки ('' = корень)
+     * @param string $keyField Поле строки, по которому ищем в lookup
+     * @param string $targetField Имя нового поля для найденного объекта
+     * @return array
+     */
+    public function enrichFromLookup(
+        array $source,
+        array $lookup,
+        string $nestedPath = 'users',
+        string $keyField = 'PERSONAL_PAGER',
+        string $targetField = 'SIP_STATUS'
+    ): array {
+        if ($nestedPath === '') {
+            $out = [];
+            foreach ($source as $key => $row) {
+                $out[$key] = is_array($row)
+                    ? $this->enrichRow($row, $lookup, $keyField, $targetField)
+                    : $row;
+            }
+            return $out;
+        }
+
+        return $this->enrichAtPath($source, explode('.', $nestedPath), $lookup, $keyField, $targetField);
+    }
+
+    /**
+     * Спускается по пути и обогащает строки найденных коллекций.
+     * 
+     * @param array $collection Коллекция-владелец
+     * @param array $segments Сегменты пути
+     * @param array $lookup Карта для поиска
+     * @param string $keyField Поле-ключ
+     * @param string $targetField Целевое поле
+     * @return array
+     */
+    private function enrichAtPath(array $collection, array $segments, array $lookup, string $keyField, string $targetField): array
+    {
+        $head = array_shift($segments);
+        $out = [];
+
+        foreach ($collection as $key => $item) {
+            if (!is_array($item) || !isset($item[$head]) || !is_array($item[$head])) {
+                // скаляр или отсутствие пути — не трогаем
+                $out[$key] = $item;
+                continue;
+            }
+
+            if (empty($segments)) {
+                $target = $item[$head];
+                $enriched = [];
+                foreach ($target as $rowKey => $row) {
+                    $enriched[$rowKey] = is_array($row)
+                        ? $this->enrichRow($row, $lookup, $keyField, $targetField)
+                        : $row;
+                }
+                $item[$head] = $enriched;
+            } else {
+                $item[$head] = $this->enrichAtPath($item[$head], $segments, $lookup, $keyField, $targetField);
+            }
+
+            $out[$key] = $item;
+        }
+
+        return $out;
+    }
+
+    /**
+     * Обогащает одну строку: ищет ключ в lookup и дописывает объект.
+     * 
+     * @param array $row Строка
+     * @param array $lookup Карта для поиска
+     * @param string $keyField Поле-ключ
+     * @param string $targetField Целевое поле
+     * @return array
+     */
+    private function enrichRow(array $row, array $lookup, string $keyField, string $targetField): array
+    {
+        if (!array_key_exists($keyField, $row) || $row[$keyField] === null || $row[$keyField] === '') {
+            return $row;   // пустой/отсутствующий ключ — строка не трогается
+        }
+
+        $keyValue = (string) $row[$keyField];
+
+        $row[$targetField] = array_key_exists($keyValue, $lookup)
+            ? $lookup[$keyValue]
+            : null;        // miss — null, чтобы фронт видел «не найдено»
+
+        return $row;
+    }
 }

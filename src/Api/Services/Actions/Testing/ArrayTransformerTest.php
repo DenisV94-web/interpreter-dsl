@@ -12,7 +12,7 @@ use Api\Services\TreeConditionMatcher;
  * Тесты сервиса ArrayTransformer: перегруппировка списков,
  * переименование полей, декларативные трансформации через fn+args.
  * 
- * Всего тестов: 42
+ * Всего тестов: 46
  * 
  * @package Api\Services\Actions\Testing
  */
@@ -90,6 +90,12 @@ class ArrayTransformerTest
         $this->testPatchTreeSetTemplateAndItemCopy();
         $this->testPatchTreeEmptyWhereAllRows();
         $this->testMatchConditionFuncDescriptor();
+
+        // enrichFromLookup (v1.28.0)
+        $this->testEnrichFromLookupHit();
+        $this->testEnrichFromLookupMiss();
+        $this->testEnrichFromLookupEmptyUntouched();
+        $this->testEnrichFromLookupRootPath();
 
         $this->logger->summary($this->passed, $this->failed);
 
@@ -1369,6 +1375,126 @@ class ArrayTransformerTest
             false,
             TreeConditionMatcher::matchCondition(['P' => '3506'], 'P', $descriptor, 0),
             'Дескриптор func:empty над "3506" → false',
+            []
+        );
+    }
+
+    /**
+     * Фикстура enrich: дерево с дырами и miss-ключом.
+     * Ключ '3500' в литерале станет int — заодно проверяем нормализацию.
+     */
+    private function enrichFixture(): array
+    {
+        return [
+            '742' => [
+                'department' => ['ID' => '742'],
+                'users' => [
+                    ['ID' => '1', 'PERSONAL_PAGER' => '3500'],
+                    ['ID' => '2', 'PERSONAL_PAGER' => '9999'],
+                    ['ID' => '3', 'PERSONAL_PAGER' => null],
+                    ['ID' => '4'],
+                ],
+            ],
+        ];
+    }
+
+    private function enrichLookup(): array
+    {
+        return [
+            '3500' => ['tech' => 'PJSIP', 'online' => true],
+        ];
+    }
+
+    private function testEnrichFromLookupHit(): void
+    {
+        $this->logger->separator('testEnrichFromLookupHit');
+        $t = new ArrayTransformer();
+
+        $result = $t->enrichFromLookup(
+            $this->enrichFixture(),
+            $this->enrichLookup(),
+            'users',
+            'PERSONAL_PAGER',
+            'SIP_STATUS'
+        );
+
+        $this->assert(
+            'testEnrichFromLookupHit',
+            ['tech' => 'PJSIP', 'online' => true],
+            $result['742']['users'][0]['SIP_STATUS'],
+            'Hit: объект lookup прикреплён целиком; int-ключ 3500 сматчился со строкой "3500"',
+            []
+        );
+    }
+
+    private function testEnrichFromLookupMiss(): void
+    {
+        $this->logger->separator('testEnrichFromLookupMiss');
+        $t = new ArrayTransformer();
+
+        $result = $t->enrichFromLookup(
+            $this->enrichFixture(),
+            $this->enrichLookup(),
+            'users',
+            'PERSONAL_PAGER',
+            'SIP_STATUS'
+        );
+
+        $this->assert(
+            'testEnrichFromLookupMiss',
+            null,
+            $result['742']['users'][1]['SIP_STATUS'],
+            'Miss: ключ заполнен, но в lookup его нет → null',
+            []
+        );
+    }
+
+    private function testEnrichFromLookupEmptyUntouched(): void
+    {
+        $this->logger->separator('testEnrichFromLookupEmptyUntouched');
+        $t = new ArrayTransformer();
+
+        $result = $t->enrichFromLookup(
+            $this->enrichFixture(),
+            $this->enrichLookup(),
+            'users',
+            'PERSONAL_PAGER',
+            'SIP_STATUS'
+        );
+
+        $this->assert(
+            'testEnrichFromLookupEmptyUntouched',
+            [false, false],
+            [
+                array_key_exists('SIP_STATUS', $result['742']['users'][2]),
+                array_key_exists('SIP_STATUS', $result['742']['users'][3]),
+            ],
+            'Пустой (null) и отсутствующий ключ: строки не тронуты, поля нет',
+            []
+        );
+    }
+
+    private function testEnrichFromLookupRootPath(): void
+    {
+        $this->logger->separator('testEnrichFromLookupRootPath');
+        $t = new ArrayTransformer();
+
+        $result = $t->enrichFromLookup(
+            [
+                ['ID' => '3500'],
+                ['ID' => 'x'],
+            ],
+            $this->enrichLookup(),
+            '',          // корневые строки
+            'ID',
+            'SIP'
+        );
+
+        $this->assert(
+            'testEnrichFromLookupRootPath',
+            [['tech' => 'PJSIP', 'online' => true], null],
+            [$result[0]['SIP'] ?? 'MISSING', $result[1]['SIP'] ?? null],
+            "nestedPath '': обогащаются сами строки корня",
             []
         );
     }
